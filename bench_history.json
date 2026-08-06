@@ -1,16 +1,16 @@
 {
-  "timestamp": "2026-08-06T18:23:15Z",
+  "timestamp": "2026-08-06T18:58:05Z",
   "cpu": "Intel(R) Core(TM) i9-14900K",
   "go_version": "go1.27rc1 GOEXPERIMENT=simd",
   "benchmarks": {
     "chacha20_simd256": {
-      "pure_go_c2simd": "2000.11 MB/s",
-      "google_asm": "1019.16 MB/s",
-      "speedup_vs_google": "+96.2%"
+      "pure_go_c2simd": "1957.25 MB/s",
+      "google_asm": "1018.91 MB/s",
+      "speedup_vs_google": "+92.1%"
     },
     "poly1305_quadchain": {
-      "pure_go_c2simd": "3061.65 MB/s",
-      "google_asm": "5192.90 MB/s",
+      "pure_go_c2simd": "3059.71 MB/s",
+      "google_asm": "5238.96 MB/s",
       "allocations": "0 B/op"
     },
     "poly1305_avx2_vpmuludq": {
@@ -18,11 +18,22 @@
       "kat_status": "PASS 100%",
       "allocations": "0 B/op"
     },
-    "aead_fused_lock_zero_alloc": {
-      "pure_go_c2simd": "1222.01 MB/s",
+    "aead_fused_engine": {
+      "pure_go_c2simd": "1220.81 MB/s",
       "monocypher_c": "485.13 MB/s",
-      "github_published": "495.37 MB/s",
-      "speedup_vs_github": "+146.7%"
+      "speedup_vs_monocypher": "+151.6%"
+    },
+    "secretstream_write_steadystate": {
+      "pure_go_secretstream": "1167.82 MB/s (1.17 GB/s)",
+      "allocations": "0 B/op"
+    },
+    "secretstream_read_steadystate": {
+      "pure_go_secretstream": "1042.39 MB/s (1.04 GB/s)",
+      "allocations": "4 allocs/op"
+    },
+    "secretstream_fullduplex": {
+      "pure_go_secretstream": "540.07 MB/s",
+      "allocations": "7 allocs/op"
     },
     "md5_ast_optimized": {
       "c2simd_ast": "7841.68 MB/s",
