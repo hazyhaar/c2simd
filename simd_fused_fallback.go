@@ -5,8 +5,23 @@ package c2simd
 import (
 	"fmt"
 
+	"golang.org/x/crypto/chacha20"
 	"golang.org/x/crypto/chacha20poly1305"
 )
+
+// HChaCha20_SIMD128 (Fallback Scalaire HChaCha20)
+func HChaCha20_SIMD128(key, nonce, out []byte) {
+	subKey, err := chacha20.HChaCha20(key, nonce)
+	if err != nil {
+		return
+	}
+	copy(out, subKey)
+}
+
+// HChaCha20 (Fallback Scalaire HChaCha20)
+func HChaCha20(key, nonce, out []byte) {
+	HChaCha20_SIMD128(key, nonce, out)
+}
 
 // AEADLockSIMD256_Fused (Fallback Scalaire Sécurisé XChaCha20-Poly1305)
 func AEADLockSIMD256_Fused(key, nonce, ad, plaintext []byte) ([]byte, []byte, error) {
