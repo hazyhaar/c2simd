@@ -18,6 +18,11 @@ const (
 
 var zeroPad16 [16]byte
 
+// HChaCha20 dérive une sous-clé 256-bit à partir de key (32B) et nonce (16B)
+func HChaCha20(key, nonce, out []byte) {
+	HChaCha20_SIMD128(key, nonce, out)
+}
+
 // HChaCha20_SIMD128 (Double-Rounds Conformes HChaCha20 100% Registres Vectoriels)
 func HChaCha20_SIMD128(key, nonce, out []byte) {
 	k0 := binary.LittleEndian.Uint32(key[0:4])
