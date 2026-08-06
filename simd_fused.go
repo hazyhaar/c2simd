@@ -104,6 +104,8 @@ func AEADLockSIMD256_Fused(key, nonce, ad, plaintext []byte) ([]byte, []byte, er
 	return cipherText, mac[:], err
 }
 
+
+
 // AEADLockSIMD256_FusedDst effectue le scellage en Pure Go (0 allocation si dstBuffer fourni)
 func AEADLockSIMD256_FusedDst(dstBuffer []byte, outMac *[16]byte, key, nonce, ad, plaintext []byte) ([]byte, error) {
 	if len(key) != 32 {
