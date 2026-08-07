@@ -9,13 +9,17 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// HChaCha20_SIMD128 (Fallback Scalaire HChaCha20)
+// HChaCha20_SIMD128 (Fallback Scalaire HChaCha20).
+// Exige key=32, nonce=16, out>=32 ; panique sinon (pas d'échec silencieux sur matériel de clé).
 func HChaCha20_SIMD128(key, nonce, out []byte) {
+	if len(key) != 32 || len(nonce) != 16 || len(out) < 32 {
+		panic("c2simd: HChaCha20 requires len(key)=32, len(nonce)=16, len(out)>=32")
+	}
 	subKey, err := chacha20.HChaCha20(key, nonce)
 	if err != nil {
-		return
+		panic("c2simd: HChaCha20: " + err.Error())
 	}
-	copy(out, subKey)
+	copy(out[:32], subKey)
 }
 
 // HChaCha20 (Fallback Scalaire HChaCha20)

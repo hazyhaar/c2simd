@@ -18,13 +18,18 @@ const (
 
 var zeroPad16 [16]byte
 
-// HChaCha20 dérive une sous-clé 256-bit à partir de key (32B) et nonce (16B)
+// HChaCha20 dérive une sous-clé 256-bit à partir de key (32B) et nonce (16B).
+// Exige key=32, nonce=16, out>=32 ; panique sinon (contrat aligné sur le repli scalaire).
 func HChaCha20(key, nonce, out []byte) {
 	HChaCha20_SIMD128(key, nonce, out)
 }
 
 // HChaCha20_SIMD128 (Double-Rounds Conformes HChaCha20 100% Registres Vectoriels)
 func HChaCha20_SIMD128(key, nonce, out []byte) {
+	if len(key) != 32 || len(nonce) != 16 || len(out) < 32 {
+		panic("c2simd: HChaCha20 requires len(key)=32, len(nonce)=16, len(out)>=32")
+	}
+
 	k0 := binary.LittleEndian.Uint32(key[0:4])
 	k1 := binary.LittleEndian.Uint32(key[4:8])
 	k2 := binary.LittleEndian.Uint32(key[8:12])

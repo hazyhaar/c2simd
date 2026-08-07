@@ -1,49 +1,46 @@
 {
-  "timestamp": "2026-08-06T19:26:30Z",
+  "timestamp": "2026-08-07T13:47:30Z",
   "cpu": "Intel(R) Core(TM) i9-14900K",
   "go_version": "go1.27rc1 GOEXPERIMENT=simd",
-  "remote_commit": "eedec9c",
+  "note": "Rebench after HChaCha20 contract fix + require_simd gate. secretstream_* removed (no code in this repo).",
   "benchmarks": {
     "chacha20_simd256": {
-      "pure_go_c2simd": "1957.25 MB/s",
-      "google_asm": "1018.91 MB/s",
-      "speedup_vs_google": "+92.1%"
-    },
-    "poly1305_quadchain": {
-      "pure_go_c2simd": "3059.71 MB/s",
-      "google_asm": "5238.96 MB/s",
+      "pure_go_c2simd": "1998.04 MB/s",
+      "google_asm": "1049.51 MB/s",
+      "speedup_vs_google": "+90.4%",
       "allocations": "0 B/op"
     },
     "poly1305_avx2_vpmuludq": {
-      "pure_go_c2simd": "2061.21 MB/s",
-      "kat_status": "PASS 100%",
+      "pure_go_c2simd": "2091.11 MB/s",
       "allocations": "0 B/op"
     },
     "aead_fused_engine": {
-      "pure_go_c2simd": "1157.42 MB/s",
-      "monocypher_c": "485.13 MB/s",
-      "speedup_vs_monocypher": "+138.6%"
+      "pure_go_c2simd": "1226.73 MB/s",
+      "monocypher_c": "487.77 MB/s",
+      "speedup_vs_monocypher": "+151.5%",
+      "allocations": "0 B/op (c2simd) / 7 allocs/op (monocypher)"
     },
-    "secretstream_write_steadystate": {
-      "pure_go_secretstream": "1134.93 MB/s (1.13 GB/s)",
+    "hchacha20_subkey": {
+      "pure_go_c2simd": "301.5 ns/op",
       "allocations": "0 B/op"
-    },
-    "secretstream_read_steadystate": {
-      "pure_go_secretstream": "978.00 MB/s (0.98 GB/s)",
-      "allocations": "4 allocs/op"
-    },
-    "secretstream_fullduplex": {
-      "pure_go_secretstream": "480.78 MB/s",
-      "allocations": "7 allocs/op"
     },
     "md5_ast_optimized": {
       "c2simd_ast": "7841.68 MB/s",
       "go_stdlib": "600.74 MB/s",
-      "speedup_vs_stdlib": "+1205.2% (13.05x)"
+      "speedup_vs_stdlib": "+1205.2% (13.05x)",
+      "note": "not re-measured 2026-08-07"
     },
     "fast_xor_ast": {
       "c2simd_ast": "22435.31 MB/s (22.4 GB/s)",
-      "allocations": "0 B/op"
+      "allocations": "0 B/op",
+      "note": "not re-measured 2026-08-07"
     }
+  },
+  "prior_certified_2026_08_06": {
+    "chacha20_simd256_pure_go": "1957.25 MB/s",
+    "google_asm": "1018.91 MB/s",
+    "aead_fused": "1157.42 MB/s",
+    "monocypher_c": "485.13 MB/s",
+    "poly1305_avx2": "2061.21 MB/s"
   }
 }
