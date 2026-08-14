@@ -1,0 +1,407 @@
+{
+  "forms_global": {
+    "scalar_double_star": 3597,
+    "array_double_star": 242,
+    "other": 219,
+    "func_def": 58
+  },
+  "files_with_ccgo_up": 58,
+  "top": [
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810g/mpc/raw.go",
+      "total_token": 427,
+      "callish": 426,
+      "shapes": {
+        "scalar_double_star": 388,
+        "other": 8,
+        "array_double_star": 14,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810g/mpc/opt.go",
+      "total_token": 427,
+      "callish": 426,
+      "shapes": {
+        "scalar_double_star": 388,
+        "other": 8,
+        "array_double_star": 14,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810h/mpc/raw.go",
+      "total_token": 427,
+      "callish": 426,
+      "shapes": {
+        "scalar_double_star": 388,
+        "other": 8,
+        "array_double_star": 14,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810f/libinjection_sqli/raw.go",
+      "total_token": 305,
+      "callish": 304,
+      "shapes": {
+        "scalar_double_star": 294,
+        "other": 4,
+        "array_double_star": 5,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810f/libinjection_sqli/opt.go",
+      "total_token": 305,
+      "callish": 304,
+      "shapes": {
+        "scalar_double_star": 294,
+        "other": 4,
+        "array_double_star": 5,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810g/cjson/raw.go",
+      "total_token": 266,
+      "callish": 265,
+      "shapes": {
+        "scalar_double_star": 209,
+        "array_double_star": 6,
+        "other": 4,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810g/cjson/opt.go",
+      "total_token": 266,
+      "callish": 265,
+      "shapes": {
+        "scalar_double_star": 209,
+        "array_double_star": 6,
+        "other": 4,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810h/cjson/raw.go",
+      "total_token": 266,
+      "callish": 265,
+      "shapes": {
+        "scalar_double_star": 209,
+        "array_double_star": 6,
+        "other": 4,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810e/tweetnacl_dogfood/raw.go",
+      "total_token": 239,
+      "callish": 238,
+      "shapes": {
+        "scalar_double_star": 102,
+        "array_double_star": 86,
+        "other": 26,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810e/tweetnacl_dogfood/opt.go",
+      "total_token": 239,
+      "callish": 238,
+      "shapes": {
+        "scalar_double_star": 102,
+        "array_double_star": 86,
+        "other": 26,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810g/lz4/raw.go",
+      "total_token": 151,
+      "callish": 150,
+      "shapes": {
+        "scalar_double_star": 117,
+        "other": 2,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810g/lz4/opt.go",
+      "total_token": 151,
+      "callish": 150,
+      "shapes": {
+        "scalar_double_star": 117,
+        "other": 2,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810h/lz4/raw.go",
+      "total_token": 151,
+      "callish": 150,
+      "shapes": {
+        "scalar_double_star": 117,
+        "other": 2,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810g/tiny_regex/raw.go",
+      "total_token": 75,
+      "callish": 74,
+      "shapes": {
+        "scalar_double_star": 67,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810g/tiny_regex/opt.go",
+      "total_token": 75,
+      "callish": 74,
+      "shapes": {
+        "scalar_double_star": 67,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810h/tiny_regex/raw.go",
+      "total_token": 75,
+      "callish": 74,
+      "shapes": {
+        "scalar_double_star": 67,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810c/poly1305_block5/raw.go",
+      "total_token": 65,
+      "callish": 64,
+      "shapes": {
+        "scalar_double_star": 44,
+        "other": 20,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810c/poly1305_block5/opt.go",
+      "total_token": 65,
+      "callish": 64,
+      "shapes": {
+        "scalar_double_star": 44,
+        "other": 20,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810d/poly1305_block5/raw.go",
+      "total_token": 65,
+      "callish": 64,
+      "shapes": {
+        "scalar_double_star": 44,
+        "other": 20,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810d/poly1305_block5/opt.go",
+      "total_token": 65,
+      "callish": 64,
+      "shapes": {
+        "scalar_double_star": 44,
+        "other": 20,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810c/chacha20_qr/raw.go",
+      "total_token": 29,
+      "callish": 28,
+      "shapes": {
+        "scalar_double_star": 16,
+        "other": 8,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810d/chacha20_qr/raw.go",
+      "total_token": 29,
+      "callish": 28,
+      "shapes": {
+        "scalar_double_star": 16,
+        "other": 8,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810c/chacha20_qr/opt.go",
+      "total_token": 25,
+      "callish": 24,
+      "shapes": {
+        "scalar_double_star": 16,
+        "other": 8,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810d/chacha20_qr/opt.go",
+      "total_token": 25,
+      "callish": 24,
+      "shapes": {
+        "scalar_double_star": 16,
+        "other": 8,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810/blake2b_compress/raw.go",
+      "total_token": 21,
+      "callish": 20,
+      "shapes": {
+        "scalar_double_star": 19,
+        "other": 1,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810/blake2b_compress/opt.go",
+      "total_token": 21,
+      "callish": 20,
+      "shapes": {
+        "scalar_double_star": 19,
+        "other": 1,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810b/blake2b_compress/raw.go",
+      "total_token": 21,
+      "callish": 20,
+      "shapes": {
+        "scalar_double_star": 19,
+        "other": 1,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810b/blake2b_compress/opt.go",
+      "total_token": 21,
+      "callish": 20,
+      "shapes": {
+        "scalar_double_star": 19,
+        "other": 1,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/c_sources/raw/blake2b_compress/blake2b_compress.go",
+      "total_token": 21,
+      "callish": 20,
+      "shapes": {
+        "scalar_double_star": 19,
+        "other": 1,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810/base64_simd/raw.go",
+      "total_token": 15,
+      "callish": 14,
+      "shapes": {
+        "scalar_double_star": 14,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810/base64_simd/opt.go",
+      "total_token": 15,
+      "callish": 14,
+      "shapes": {
+        "scalar_double_star": 14,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810/siphash24/raw.go",
+      "total_token": 11,
+      "callish": 10,
+      "shapes": {
+        "scalar_double_star": 10,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810/siphash24/opt.go",
+      "total_token": 11,
+      "callish": 10,
+      "shapes": {
+        "scalar_double_star": 10,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/c_sources/raw/siphash24/siphash24.go",
+      "total_token": 11,
+      "callish": 10,
+      "shapes": {
+        "scalar_double_star": 10,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810/md5_transform/raw.go",
+      "total_token": 10,
+      "callish": 9,
+      "shapes": {
+        "scalar_double_star": 9,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810/md5_transform/opt.go",
+      "total_token": 10,
+      "callish": 9,
+      "shapes": {
+        "scalar_double_star": 9,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/c_sources/raw/md5_transform/md5_transform.go",
+      "total_token": 10,
+      "callish": 9,
+      "shapes": {
+        "scalar_double_star": 9,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810/fast_xor/raw.go",
+      "total_token": 7,
+      "callish": 6,
+      "shapes": {
+        "scalar_double_star": 6,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/dogfood/testdata/cycles/20260810/fast_xor/opt.go",
+      "total_token": 7,
+      "callish": 6,
+      "shapes": {
+        "scalar_double_star": 6,
+        "func_def": 1
+      }
+    },
+    {
+      "file": "spec/c_sources/raw/fast_xor/fast_xor.go",
+      "total_token": 7,
+      "callish": 6,
+      "shapes": {
+        "scalar_double_star": 6,
+        "func_def": 1
+      }
+    }
+  ]
+}

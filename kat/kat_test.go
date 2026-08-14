@@ -7,8 +7,8 @@ import (
 	"testing"
 	"unsafe"
 
-	c2simd "github.com/hazyhaar/c2simd"
-	transformed "github.com/hazyhaar/c2simd/internal/transformed"
+	c2simd "code.hazyhaar.fr/devhoros/c2simd"
+	transformed "code.hazyhaar.fr/devhoros/c2simd/internal/transformed"
 	"golang.org/x/crypto/chacha20poly1305"
 	"modernc.org/libc"
 )

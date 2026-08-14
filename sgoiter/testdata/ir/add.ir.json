@@ -1,0 +1,38 @@
+{
+  "name": "add",
+  "funcs": [
+    {
+      "name": "add",
+      "result": "int",
+      "params": [
+        {
+          "name": "a",
+          "type": "int",
+          "reg": 0
+        },
+        {
+          "name": "b",
+          "type": "int",
+          "reg": 1
+        }
+      ],
+      "nvals": 3,
+      "body": [
+        {
+          "op": 3,
+          "dst": 2,
+          "args": [
+            0,
+            1
+          ]
+        },
+        {
+          "op": 13,
+          "args": [
+            2
+          ]
+        }
+      ]
+    }
+  ]
+}

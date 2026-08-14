@@ -1,0 +1,13 @@
+// Workspace dédié transpilation (décret 2026-08-14) : LE BUT du pôle est
+// la transpilation C → Go-SIMD sous Go 1.27 + GOEXPERIMENT=simd.
+// Épingle go1.27rc3 jusqu'à la sortie stable de Go 1.27.
+// Depuis /devhoros/pkg/*, activer via GOWORK=/devhoros/c2simd/go.work.
+go 1.27rc3
+
+toolchain go1.27rc3
+
+use (
+	.
+	../pkg/monocypher55
+	../pkg/secretstream55
+)

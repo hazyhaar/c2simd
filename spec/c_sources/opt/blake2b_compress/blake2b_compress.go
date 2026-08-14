@@ -2,6 +2,7 @@ package opt_blake2b_compress
 
 import (
 	"math"
+	"math/bits"
 	"reflect"
 	"unsafe"
 
@@ -688,7 +689,7 @@ func Blake2b_compress_block(tls *libc.TLS, h uintptr, block uintptr, t0 uint64_t
 		if !(i < int32(16)) {
 			break
 		}
-		m[i] = **(**uint64_t)(__ccgo_up(block + uintptr(i)*8))
+		m[i] = *(*uint64_t)(unsafe.Pointer(block + uintptr(i)*8))
 		goto _1
 	_1:
 		;
@@ -699,7 +700,7 @@ func Blake2b_compress_block(tls *libc.TLS, h uintptr, block uintptr, t0 uint64_t
 		if !(i < int32(8)) {
 			break
 		}
-		v[i] = **(**uint64_t)(__ccgo_up(h + uintptr(i)*8))
+		v[i] = *(*uint64_t)(unsafe.Pointer(h + uintptr(i)*8))
 		goto _2
 	_2:
 		;
@@ -718,70 +719,70 @@ func Blake2b_compress_block(tls *libc.TLS, h uintptr, block uintptr, t0 uint64_t
 		if !(r < int32(12)) {
 			break
 		}
-		v[0] = v[0] + v[int32(4)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(0))))]
-		v[int32(12)] = (v[int32(12)]^v[0])>>int32(32) ^ (v[int32(12)]^v[0])<<(int32(64)-int32(32))
+		v[0] = v[0] + v[int32(4)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(0))))]
+		v[int32(12)] = bits.RotateLeft64((v[int32(12)] ^ v[0]), int(32))
 		v[int32(8)] = v[int32(8)] + v[int32(12)]
-		v[int32(4)] = (v[int32(4)]^v[int32(8)])>>int32(24) ^ (v[int32(4)]^v[int32(8)])<<(int32(64)-int32(24))
-		v[0] = v[0] + v[int32(4)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(0)+int32(1))))]
-		v[int32(12)] = (v[int32(12)]^v[0])>>int32(16) ^ (v[int32(12)]^v[0])<<(int32(64)-int32(16))
+		v[int32(4)] = bits.RotateLeft64((v[int32(4)] ^ v[int32(8)]), int(40))
+		v[0] = v[0] + v[int32(4)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(0)+int32(1))))]
+		v[int32(12)] = bits.RotateLeft64((v[int32(12)] ^ v[0]), int(48))
 		v[int32(8)] = v[int32(8)] + v[int32(12)]
-		v[int32(4)] = (v[int32(4)]^v[int32(8)])>>int32(63) ^ (v[int32(4)]^v[int32(8)])<<(int32(64)-int32(63))
-		v[int32(1)] = v[int32(1)] + v[int32(5)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(1))))]
-		v[int32(13)] = (v[int32(13)]^v[int32(1)])>>int32(32) ^ (v[int32(13)]^v[int32(1)])<<(int32(64)-int32(32))
+		v[int32(4)] = bits.RotateLeft64((v[int32(4)] ^ v[int32(8)]), int(1))
+		v[int32(1)] = v[int32(1)] + v[int32(5)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(1))))]
+		v[int32(13)] = bits.RotateLeft64((v[int32(13)] ^ v[int32(1)]), int(32))
 		v[int32(9)] = v[int32(9)] + v[int32(13)]
-		v[int32(5)] = (v[int32(5)]^v[int32(9)])>>int32(24) ^ (v[int32(5)]^v[int32(9)])<<(int32(64)-int32(24))
-		v[int32(1)] = v[int32(1)] + v[int32(5)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(1)+int32(1))))]
-		v[int32(13)] = (v[int32(13)]^v[int32(1)])>>int32(16) ^ (v[int32(13)]^v[int32(1)])<<(int32(64)-int32(16))
+		v[int32(5)] = bits.RotateLeft64((v[int32(5)] ^ v[int32(9)]), int(40))
+		v[int32(1)] = v[int32(1)] + v[int32(5)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(1)+int32(1))))]
+		v[int32(13)] = bits.RotateLeft64((v[int32(13)] ^ v[int32(1)]), int(48))
 		v[int32(9)] = v[int32(9)] + v[int32(13)]
-		v[int32(5)] = (v[int32(5)]^v[int32(9)])>>int32(63) ^ (v[int32(5)]^v[int32(9)])<<(int32(64)-int32(63))
-		v[int32(2)] = v[int32(2)] + v[int32(6)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(2))))]
-		v[int32(14)] = (v[int32(14)]^v[int32(2)])>>int32(32) ^ (v[int32(14)]^v[int32(2)])<<(int32(64)-int32(32))
+		v[int32(5)] = bits.RotateLeft64((v[int32(5)] ^ v[int32(9)]), int(1))
+		v[int32(2)] = v[int32(2)] + v[int32(6)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(2))))]
+		v[int32(14)] = bits.RotateLeft64((v[int32(14)] ^ v[int32(2)]), int(32))
 		v[int32(10)] = v[int32(10)] + v[int32(14)]
-		v[int32(6)] = (v[int32(6)]^v[int32(10)])>>int32(24) ^ (v[int32(6)]^v[int32(10)])<<(int32(64)-int32(24))
-		v[int32(2)] = v[int32(2)] + v[int32(6)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(2)+int32(1))))]
-		v[int32(14)] = (v[int32(14)]^v[int32(2)])>>int32(16) ^ (v[int32(14)]^v[int32(2)])<<(int32(64)-int32(16))
+		v[int32(6)] = bits.RotateLeft64((v[int32(6)] ^ v[int32(10)]), int(40))
+		v[int32(2)] = v[int32(2)] + v[int32(6)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(2)+int32(1))))]
+		v[int32(14)] = bits.RotateLeft64((v[int32(14)] ^ v[int32(2)]), int(48))
 		v[int32(10)] = v[int32(10)] + v[int32(14)]
-		v[int32(6)] = (v[int32(6)]^v[int32(10)])>>int32(63) ^ (v[int32(6)]^v[int32(10)])<<(int32(64)-int32(63))
-		v[int32(3)] = v[int32(3)] + v[int32(7)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(3))))]
-		v[int32(15)] = (v[int32(15)]^v[int32(3)])>>int32(32) ^ (v[int32(15)]^v[int32(3)])<<(int32(64)-int32(32))
+		v[int32(6)] = bits.RotateLeft64((v[int32(6)] ^ v[int32(10)]), int(1))
+		v[int32(3)] = v[int32(3)] + v[int32(7)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(3))))]
+		v[int32(15)] = bits.RotateLeft64((v[int32(15)] ^ v[int32(3)]), int(32))
 		v[int32(11)] = v[int32(11)] + v[int32(15)]
-		v[int32(7)] = (v[int32(7)]^v[int32(11)])>>int32(24) ^ (v[int32(7)]^v[int32(11)])<<(int32(64)-int32(24))
-		v[int32(3)] = v[int32(3)] + v[int32(7)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(3)+int32(1))))]
-		v[int32(15)] = (v[int32(15)]^v[int32(3)])>>int32(16) ^ (v[int32(15)]^v[int32(3)])<<(int32(64)-int32(16))
+		v[int32(7)] = bits.RotateLeft64((v[int32(7)] ^ v[int32(11)]), int(40))
+		v[int32(3)] = v[int32(3)] + v[int32(7)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(3)+int32(1))))]
+		v[int32(15)] = bits.RotateLeft64((v[int32(15)] ^ v[int32(3)]), int(48))
 		v[int32(11)] = v[int32(11)] + v[int32(15)]
-		v[int32(7)] = (v[int32(7)]^v[int32(11)])>>int32(63) ^ (v[int32(7)]^v[int32(11)])<<(int32(64)-int32(63))
-		v[0] = v[0] + v[int32(5)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(4))))]
-		v[int32(15)] = (v[int32(15)]^v[0])>>int32(32) ^ (v[int32(15)]^v[0])<<(int32(64)-int32(32))
+		v[int32(7)] = bits.RotateLeft64((v[int32(7)] ^ v[int32(11)]), int(1))
+		v[0] = v[0] + v[int32(5)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(4))))]
+		v[int32(15)] = bits.RotateLeft64((v[int32(15)] ^ v[0]), int(32))
 		v[int32(10)] = v[int32(10)] + v[int32(15)]
-		v[int32(5)] = (v[int32(5)]^v[int32(10)])>>int32(24) ^ (v[int32(5)]^v[int32(10)])<<(int32(64)-int32(24))
-		v[0] = v[0] + v[int32(5)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(4)+int32(1))))]
-		v[int32(15)] = (v[int32(15)]^v[0])>>int32(16) ^ (v[int32(15)]^v[0])<<(int32(64)-int32(16))
+		v[int32(5)] = bits.RotateLeft64((v[int32(5)] ^ v[int32(10)]), int(40))
+		v[0] = v[0] + v[int32(5)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(4)+int32(1))))]
+		v[int32(15)] = bits.RotateLeft64((v[int32(15)] ^ v[0]), int(48))
 		v[int32(10)] = v[int32(10)] + v[int32(15)]
-		v[int32(5)] = (v[int32(5)]^v[int32(10)])>>int32(63) ^ (v[int32(5)]^v[int32(10)])<<(int32(64)-int32(63))
-		v[int32(1)] = v[int32(1)] + v[int32(6)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(5))))]
-		v[int32(12)] = (v[int32(12)]^v[int32(1)])>>int32(32) ^ (v[int32(12)]^v[int32(1)])<<(int32(64)-int32(32))
+		v[int32(5)] = bits.RotateLeft64((v[int32(5)] ^ v[int32(10)]), int(1))
+		v[int32(1)] = v[int32(1)] + v[int32(6)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(5))))]
+		v[int32(12)] = bits.RotateLeft64((v[int32(12)] ^ v[int32(1)]), int(32))
 		v[int32(11)] = v[int32(11)] + v[int32(12)]
-		v[int32(6)] = (v[int32(6)]^v[int32(11)])>>int32(24) ^ (v[int32(6)]^v[int32(11)])<<(int32(64)-int32(24))
-		v[int32(1)] = v[int32(1)] + v[int32(6)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(5)+int32(1))))]
-		v[int32(12)] = (v[int32(12)]^v[int32(1)])>>int32(16) ^ (v[int32(12)]^v[int32(1)])<<(int32(64)-int32(16))
+		v[int32(6)] = bits.RotateLeft64((v[int32(6)] ^ v[int32(11)]), int(40))
+		v[int32(1)] = v[int32(1)] + v[int32(6)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(5)+int32(1))))]
+		v[int32(12)] = bits.RotateLeft64((v[int32(12)] ^ v[int32(1)]), int(48))
 		v[int32(11)] = v[int32(11)] + v[int32(12)]
-		v[int32(6)] = (v[int32(6)]^v[int32(11)])>>int32(63) ^ (v[int32(6)]^v[int32(11)])<<(int32(64)-int32(63))
-		v[int32(2)] = v[int32(2)] + v[int32(7)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(6))))]
-		v[int32(13)] = (v[int32(13)]^v[int32(2)])>>int32(32) ^ (v[int32(13)]^v[int32(2)])<<(int32(64)-int32(32))
+		v[int32(6)] = bits.RotateLeft64((v[int32(6)] ^ v[int32(11)]), int(1))
+		v[int32(2)] = v[int32(2)] + v[int32(7)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(6))))]
+		v[int32(13)] = bits.RotateLeft64((v[int32(13)] ^ v[int32(2)]), int(32))
 		v[int32(8)] = v[int32(8)] + v[int32(13)]
-		v[int32(7)] = (v[int32(7)]^v[int32(8)])>>int32(24) ^ (v[int32(7)]^v[int32(8)])<<(int32(64)-int32(24))
-		v[int32(2)] = v[int32(2)] + v[int32(7)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(6)+int32(1))))]
-		v[int32(13)] = (v[int32(13)]^v[int32(2)])>>int32(16) ^ (v[int32(13)]^v[int32(2)])<<(int32(64)-int32(16))
+		v[int32(7)] = bits.RotateLeft64((v[int32(7)] ^ v[int32(8)]), int(40))
+		v[int32(2)] = v[int32(2)] + v[int32(7)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(6)+int32(1))))]
+		v[int32(13)] = bits.RotateLeft64((v[int32(13)] ^ v[int32(2)]), int(48))
 		v[int32(8)] = v[int32(8)] + v[int32(13)]
-		v[int32(7)] = (v[int32(7)]^v[int32(8)])>>int32(63) ^ (v[int32(7)]^v[int32(8)])<<(int32(64)-int32(63))
-		v[int32(3)] = v[int32(3)] + v[int32(4)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(7))))]
-		v[int32(14)] = (v[int32(14)]^v[int32(3)])>>int32(32) ^ (v[int32(14)]^v[int32(3)])<<(int32(64)-int32(32))
+		v[int32(7)] = bits.RotateLeft64((v[int32(7)] ^ v[int32(8)]), int(1))
+		v[int32(3)] = v[int32(3)] + v[int32(4)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(7))))]
+		v[int32(14)] = bits.RotateLeft64((v[int32(14)] ^ v[int32(3)]), int(32))
 		v[int32(9)] = v[int32(9)] + v[int32(14)]
-		v[int32(4)] = (v[int32(4)]^v[int32(9)])>>int32(24) ^ (v[int32(4)]^v[int32(9)])<<(int32(64)-int32(24))
-		v[int32(3)] = v[int32(3)] + v[int32(4)] + m[**(**uint8_t)(__ccgo_up(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(7)+int32(1))))]
-		v[int32(14)] = (v[int32(14)]^v[int32(3)])>>int32(16) ^ (v[int32(14)]^v[int32(3)])<<(int32(64)-int32(16))
+		v[int32(4)] = bits.RotateLeft64((v[int32(4)] ^ v[int32(9)]), int(40))
+		v[int32(3)] = v[int32(3)] + v[int32(4)] + m[*(*uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(&blake2b_sigma)) + uintptr(r)*16 + uintptr(int32(2)*int32(7)+int32(1))))]
+		v[int32(14)] = bits.RotateLeft64((v[int32(14)] ^ v[int32(3)]), int(48))
 		v[int32(9)] = v[int32(9)] + v[int32(14)]
-		v[int32(4)] = (v[int32(4)]^v[int32(9)])>>int32(63) ^ (v[int32(4)]^v[int32(9)])<<(int32(64)-int32(63))
+		v[int32(4)] = bits.RotateLeft64((v[int32(4)] ^ v[int32(9)]), int(1))
 		goto _3
 	_3:
 		;
@@ -792,14 +793,10 @@ func Blake2b_compress_block(tls *libc.TLS, h uintptr, block uintptr, t0 uint64_t
 		if !(i < int32(8)) {
 			break
 		}
-		**(**uint64_t)(__ccgo_up(h + uintptr(i)*8)) = **(**uint64_t)(__ccgo_up(h + uintptr(i)*8)) ^ v[i] ^ v[i+int32(8)]
+		*(*uint64_t)(unsafe.Pointer(h + uintptr(i)*8)) = *(*uint64_t)(unsafe.Pointer(h + uintptr(i)*8)) ^ v[i] ^ v[i+int32(8)]
 		goto _4
 	_4:
 		;
 		i = i + 1
 	}
-}
-
-func __ccgo_up(n uintptr) unsafe.Pointer {
-	return unsafe.Pointer(&n)
 }

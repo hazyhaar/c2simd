@@ -484,16 +484,16 @@ func Md5_transform_block(tls *libc.TLS, state uintptr, block uintptr) {
 	var i int32
 	var x [16]uint32_t
 	_, _, _, _, _, _ = a, b, c, d, i, x
-	a = **(**uint32_t)(__ccgo_up(state))
-	b = **(**uint32_t)(__ccgo_up(state + 1*4))
-	c = **(**uint32_t)(__ccgo_up(state + 2*4))
-	d = **(**uint32_t)(__ccgo_up(state + 3*4))
+	a = *(*uint32_t)(unsafe.Pointer(state))
+	b = *(*uint32_t)(unsafe.Pointer(state + 1*4))
+	c = *(*uint32_t)(unsafe.Pointer(state + 2*4))
+	d = *(*uint32_t)(unsafe.Pointer(state + 3*4))
 	i = 0
 	for {
 		if !(i < int32(16)) {
 			break
 		}
-		x[i] = **(**uint32_t)(__ccgo_up(block + uintptr(i)*4))
+		x[i] = *(*uint32_t)(unsafe.Pointer(block + uintptr(i)*4))
 		goto _1
 	_1:
 		;
@@ -511,12 +511,8 @@ func Md5_transform_block(tls *libc.TLS, state uintptr, block uintptr) {
 	b = b + (c&d | ^c&a + x[int32(3)] + uint32(0xc1bdceee))
 	b = bits.RotateLeft32(b, int(22))
 	b = b + c
-	**(**uint32_t)(__ccgo_up(state)) += a
-	**(**uint32_t)(__ccgo_up(state + 1*4)) += b
-	**(**uint32_t)(__ccgo_up(state + 2*4)) += c
-	**(**uint32_t)(__ccgo_up(state + 3*4)) += d
-}
-
-func __ccgo_up(n uintptr) unsafe.Pointer {
-	return unsafe.Pointer(&n)
+	*(*uint32_t)(unsafe.Pointer(state)) += a
+	*(*uint32_t)(unsafe.Pointer(state + 1*4)) += b
+	*(*uint32_t)(unsafe.Pointer(state + 2*4)) += c
+	*(*uint32_t)(unsafe.Pointer(state + 3*4)) += d
 }

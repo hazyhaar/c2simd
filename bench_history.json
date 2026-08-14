@@ -1,46 +1,112 @@
-{
-  "timestamp": "2026-08-07T13:47:30Z",
-  "cpu": "Intel(R) Core(TM) i9-14900K",
-  "go_version": "go1.27rc1 GOEXPERIMENT=simd",
-  "note": "Rebench after HChaCha20 contract fix + require_simd gate. secretstream_* removed (no code in this repo).",
-  "benchmarks": {
-    "chacha20_simd256": {
-      "pure_go_c2simd": "1998.04 MB/s",
-      "google_asm": "1049.51 MB/s",
-      "speedup_vs_google": "+90.4%",
-      "allocations": "0 B/op"
-    },
-    "poly1305_avx2_vpmuludq": {
-      "pure_go_c2simd": "2091.11 MB/s",
-      "allocations": "0 B/op"
-    },
-    "aead_fused_engine": {
-      "pure_go_c2simd": "1226.73 MB/s",
-      "monocypher_c": "487.77 MB/s",
-      "speedup_vs_monocypher": "+151.5%",
-      "allocations": "0 B/op (c2simd) / 7 allocs/op (monocypher)"
-    },
-    "hchacha20_subkey": {
-      "pure_go_c2simd": "301.5 ns/op",
-      "allocations": "0 B/op"
-    },
-    "md5_ast_optimized": {
-      "c2simd_ast": "7841.68 MB/s",
-      "go_stdlib": "600.74 MB/s",
-      "speedup_vs_stdlib": "+1205.2% (13.05x)",
-      "note": "not re-measured 2026-08-07"
-    },
-    "fast_xor_ast": {
-      "c2simd_ast": "22435.31 MB/s (22.4 GB/s)",
-      "allocations": "0 B/op",
-      "note": "not re-measured 2026-08-07"
+[
+  {
+    "timestamp": "2026-08-14T13:52:27+02:00",
+    "metrics": {
+      "BenchmarkC2SIMD_FusedSIMD256_Lock_1MB-32": {
+        "name": "BenchmarkC2SIMD_FusedSIMD256_Lock_1MB-32",
+        "ns_per_op": 962971,
+        "mb_ps": 1088.9,
+        "bytes_per_op": 0,
+        "allocs_per_op": 0
+      },
+      "BenchmarkC2SIMD_FusedSIMD256_Lock_1MB_ZeroAlloc_NoGC-32": {
+        "name": "BenchmarkC2SIMD_FusedSIMD256_Lock_1MB_ZeroAlloc_NoGC-32",
+        "ns_per_op": 953419,
+        "mb_ps": 1099.81,
+        "bytes_per_op": 0,
+        "allocs_per_op": 0
+      },
+      "BenchmarkC2SIMD_Lock_1MB-32": {
+        "name": "BenchmarkC2SIMD_Lock_1MB-32",
+        "ns_per_op": 1415060,
+        "mb_ps": 741.01,
+        "bytes_per_op": 1048592,
+        "allocs_per_op": 2
+      },
+      "BenchmarkC2SIMD_SIMD256_PureStream_1MB-32": {
+        "name": "BenchmarkC2SIMD_SIMD256_PureStream_1MB-32",
+        "ns_per_op": 597340,
+        "mb_ps": 1755.41,
+        "bytes_per_op": 0,
+        "allocs_per_op": 0
+      },
+      "BenchmarkMonocypher_Lock_1MB-32": {
+        "name": "BenchmarkMonocypher_Lock_1MB-32",
+        "ns_per_op": 2809565,
+        "mb_ps": 373.22,
+        "bytes_per_op": 1048928,
+        "allocs_per_op": 7
+      },
+      "BenchmarkNativeGo_Seal_1MB-32": {
+        "name": "BenchmarkNativeGo_Seal_1MB-32",
+        "ns_per_op": 616992,
+        "mb_ps": 1699.5,
+        "bytes_per_op": 1056787,
+        "allocs_per_op": 1
+      },
+      "BenchmarkPoly1305_AVX2_VPMULUDQ_1MB-32": {
+        "name": "BenchmarkPoly1305_AVX2_VPMULUDQ_1MB-32",
+        "ns_per_op": 663791,
+        "mb_ps": 1579.68,
+        "bytes_per_op": 0,
+        "allocs_per_op": 0
+      },
+      "BenchmarkScoped_ChaCha20_C2SIMD_PureGo-32": {
+        "name": "BenchmarkScoped_ChaCha20_C2SIMD_PureGo-32",
+        "ns_per_op": 684524,
+        "mb_ps": 1531.83,
+        "bytes_per_op": 0,
+        "allocs_per_op": 0
+      },
+      "BenchmarkScoped_ChaCha20_XCrypto_ASM-32": {
+        "name": "BenchmarkScoped_ChaCha20_XCrypto_ASM-32",
+        "ns_per_op": 1258292,
+        "mb_ps": 833.33,
+        "bytes_per_op": 0,
+        "allocs_per_op": 0
+      },
+      "BenchmarkScoped_Poly1305_C2SIMD_OriginalScalar-32": {
+        "name": "BenchmarkScoped_Poly1305_C2SIMD_OriginalScalar-32",
+        "ns_per_op": 410784,
+        "mb_ps": 2552.62,
+        "bytes_per_op": 0,
+        "allocs_per_op": 0
+      },
+      "BenchmarkScoped_Poly1305_XCrypto_ASM-32": {
+        "name": "BenchmarkScoped_Poly1305_XCrypto_ASM-32",
+        "ns_per_op": 251677,
+        "mb_ps": 4166.36,
+        "bytes_per_op": 0,
+        "allocs_per_op": 0
+      },
+      "BenchmarkStep3_PayloadEncrypt_ChaCha20_C2SIMD-32": {
+        "name": "BenchmarkStep3_PayloadEncrypt_ChaCha20_C2SIMD-32",
+        "ns_per_op": 683842,
+        "mb_ps": 1533.36,
+        "bytes_per_op": 0,
+        "allocs_per_op": 0
+      },
+      "BenchmarkStep3_PayloadEncrypt_ChaCha20_XCrypto_ASM-32": {
+        "name": "BenchmarkStep3_PayloadEncrypt_ChaCha20_XCrypto_ASM-32",
+        "ns_per_op": 1262564,
+        "mb_ps": 830.51,
+        "bytes_per_op": 0,
+        "allocs_per_op": 0
+      },
+      "BenchmarkStep4_MACTag_Poly1305_C2SIMD_DualChain-32": {
+        "name": "BenchmarkStep4_MACTag_Poly1305_C2SIMD_DualChain-32",
+        "ns_per_op": 397558,
+        "mb_ps": 2637.54,
+        "bytes_per_op": 0,
+        "allocs_per_op": 0
+      },
+      "BenchmarkStep4_MACTag_Poly1305_XCrypto_ASM-32": {
+        "name": "BenchmarkStep4_MACTag_Poly1305_XCrypto_ASM-32",
+        "ns_per_op": 241221,
+        "mb_ps": 4346.95,
+        "bytes_per_op": 0,
+        "allocs_per_op": 0
+      }
     }
-  },
-  "prior_certified_2026_08_06": {
-    "chacha20_simd256_pure_go": "1957.25 MB/s",
-    "google_asm": "1018.91 MB/s",
-    "aead_fused": "1157.42 MB/s",
-    "monocypher_c": "485.13 MB/s",
-    "poly1305_avx2": "2061.21 MB/s"
   }
-}
+]

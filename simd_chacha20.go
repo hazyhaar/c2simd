@@ -6,6 +6,8 @@ import (
 	"simd/archsimd"
 )
 
+
+
 // ChaCha20QuarterRoundSIMD effectue un quart de tour ChaCha20 sur 4 colonnes en parallèle (128-bit Uint32x4).
 func ChaCha20QuarterRoundSIMD(v0, v1, v2, v3 archsimd.Uint32x4) (archsimd.Uint32x4, archsimd.Uint32x4, archsimd.Uint32x4, archsimd.Uint32x4) {
 	v0 = v0.Add(v1)

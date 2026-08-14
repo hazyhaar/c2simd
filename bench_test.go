@@ -7,8 +7,8 @@ import (
 	"runtime/debug"
 	"testing"
 
-	"github.com/hazyhaar/c2simd"
-	"github.com/hazyhaar/c2simd/internal/monocypher"
+	"code.hazyhaar.fr/devhoros/c2simd"
+	"code.hazyhaar.fr/devhoros/c2simd/internal/monocypher"
 	"golang.org/x/crypto/chacha20poly1305"
 )
 

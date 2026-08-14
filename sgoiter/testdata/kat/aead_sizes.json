@@ -1,0 +1,45 @@
+{
+  "algo": "monocypher-4.0.2 XChaCha20-Poly1305 crypto_aead_lock",
+  "key_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "nonce_hex": "0a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021",
+  "source": "bit-exact gcc -O0 monocypher.c + sgoiter + ccgo 2026-08-11",
+  "cases": [
+    {
+      "name": "pt0_ad_empty",
+      "ad_hex": "",
+      "pt_hex": "",
+      "ct_hex": "",
+      "mac_hex": "9be090006cf29fd8b0dd59353acbe20b"
+    },
+    {
+      "name": "pt1_ad_empty",
+      "ad_hex": "",
+      "pt_hex": "41",
+      "ct_hex": "d4",
+      "mac_hex": "9a798dc35228a8db93663d3b25bd3f49"
+    },
+    {
+      "name": "pt36_header",
+      "ad_hex": "484541444552",
+      "pt_hex": "48454c4c4f204d4f4e4f4359504845522053474f4954455220414541442043474f3d3021",
+      "ct_hex": "dda2911b26a7e7a5abaad1a569c4a0d74a7d5c24e6f15f9f2a84b02d3140dbda31ec3159",
+      "mac_hex": "e785904ab4c53aaf4dd02d39b2515636"
+    },
+    {
+      "name": "pt64_ad_empty",
+      "ad_hex": "",
+      "pt_len": 64,
+      "pt_pattern": "i%251",
+      "ct_hex": "95e6df546d82acededec98f73581eb8a7a3f0978bbb00cda12dcef77697d86825ef0235bc8af06a15d8ad6a1e1a9b4d05afbde0f181b569ea23273cf151a1a9b",
+      "mac_hex": "d0ddfa56ba0eac95404a345c1b5059f1"
+    },
+    {
+      "name": "pt1024_header1kb",
+      "ad_hex": "48454144455220314b42",
+      "pt_len": 1024,
+      "pt_pattern": "(i*17+3)%251",
+      "ct_head32_hex": "96f3f8612edfc3906e793f42f66c148272072120f3c86442aa7437bf91959381",
+      "mac_hex": "e7a25c82f46f5750c4038396cd5ebf3d"
+    }
+  ]
+}

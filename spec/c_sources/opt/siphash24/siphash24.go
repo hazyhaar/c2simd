@@ -477,8 +477,8 @@ func Siphash24(tls *libc.TLS, in uintptr, inlen size_t, k uintptr) (r uint64_t) 
 	var b, k0, k1, m, v0, v1, v2, v3 uint64_t
 	var end uintptr
 	_, _, _, _, _, _, _, _, _ = b, end, k0, k1, m, v0, v1, v2, v3
-	k0 = **(**uint64_t)(__ccgo_up(k))
-	k1 = **(**uint64_t)(__ccgo_up(k + 1*8))
+	k0 = *(*uint64_t)(unsafe.Pointer(k))
+	k1 = *(*uint64_t)(unsafe.Pointer(k + 1*8))
 	v0 = uint64(0x736f6d6570736575) ^ k0
 	v1 = uint64(0x646f72616d617461) ^ k1
 	v2 = uint64(0x6c7967656e657261) ^ k0
@@ -488,7 +488,7 @@ func Siphash24(tls *libc.TLS, in uintptr, inlen size_t, k uintptr) (r uint64_t) 
 		if !(in != end) {
 			break
 		}
-		m = **(**uint64_t)(__ccgo_up(in))
+		m = *(*uint64_t)(unsafe.Pointer(in))
 		v3 = v3 ^ m
 		v0 = v0 + v1
 		v1 = bits.RotateLeft64(v1, int(13))
@@ -527,25 +527,25 @@ func Siphash24(tls *libc.TLS, in uintptr, inlen size_t, k uintptr) (r uint64_t) 
 	b = inlen << int32(56)
 	switch inlen & uint64(7) {
 	case uint64(7):
-		b = b | uint64(**(**uint8_t)(__ccgo_up(in + 6)))<<int32(48)
+		b = b | uint64(*(*uint8_t)(unsafe.Pointer(in + 6)))<<int32(48)
 		fallthrough
 	case uint64(6):
-		b = b | uint64(**(**uint8_t)(__ccgo_up(in + 5)))<<int32(40)
+		b = b | uint64(*(*uint8_t)(unsafe.Pointer(in + 5)))<<int32(40)
 		fallthrough
 	case uint64(5):
-		b = b | uint64(**(**uint8_t)(__ccgo_up(in + 4)))<<int32(32)
+		b = b | uint64(*(*uint8_t)(unsafe.Pointer(in + 4)))<<int32(32)
 		fallthrough
 	case uint64(4):
-		b = b | uint64(**(**uint8_t)(__ccgo_up(in + 3)))<<int32(24)
+		b = b | uint64(*(*uint8_t)(unsafe.Pointer(in + 3)))<<int32(24)
 		fallthrough
 	case uint64(3):
-		b = b | uint64(**(**uint8_t)(__ccgo_up(in + 2)))<<int32(16)
+		b = b | uint64(*(*uint8_t)(unsafe.Pointer(in + 2)))<<int32(16)
 		fallthrough
 	case uint64(2):
-		b = b | uint64(**(**uint8_t)(__ccgo_up(in + 1)))<<int32(8)
+		b = b | uint64(*(*uint8_t)(unsafe.Pointer(in + 1)))<<int32(8)
 		fallthrough
 	case uint64(1):
-		b = b | uint64(**(**uint8_t)(__ccgo_up(in)))
+		b = b | uint64(*(*uint8_t)(unsafe.Pointer(in)))
 		fallthrough
 	case uint64(0):
 		break
@@ -638,8 +638,4 @@ func Siphash24(tls *libc.TLS, in uintptr, inlen size_t, k uintptr) (r uint64_t) 
 	v1 = v1 ^ v2
 	v2 = bits.RotateLeft64(v2, int(32))
 	return v0 ^ v1 ^ v2 ^ v3
-}
-
-func __ccgo_up(n uintptr) unsafe.Pointer {
-	return unsafe.Pointer(&n)
 }

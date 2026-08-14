@@ -6,15 +6,15 @@ import (
 	"testing"
 	"unsafe"
 
-	opt_blake2b "github.com/hazyhaar/c2simd/spec/c_sources/opt/blake2b_compress"
-	opt_xor "github.com/hazyhaar/c2simd/spec/c_sources/opt/fast_xor"
-	opt_md5 "github.com/hazyhaar/c2simd/spec/c_sources/opt/md5_transform"
-	opt_sip "github.com/hazyhaar/c2simd/spec/c_sources/opt/siphash24"
+	opt_blake2b "code.hazyhaar.fr/devhoros/c2simd/spec/c_sources/opt/blake2b_compress"
+	opt_xor "code.hazyhaar.fr/devhoros/c2simd/spec/c_sources/opt/fast_xor"
+	opt_md5 "code.hazyhaar.fr/devhoros/c2simd/spec/c_sources/opt/md5_transform"
+	opt_sip "code.hazyhaar.fr/devhoros/c2simd/spec/c_sources/opt/siphash24"
 
-	raw_blake2b "github.com/hazyhaar/c2simd/spec/c_sources/raw/blake2b_compress"
-	raw_xor "github.com/hazyhaar/c2simd/spec/c_sources/raw/fast_xor"
-	raw_md5 "github.com/hazyhaar/c2simd/spec/c_sources/raw/md5_transform"
-	raw_sip "github.com/hazyhaar/c2simd/spec/c_sources/raw/siphash24"
+	raw_blake2b "code.hazyhaar.fr/devhoros/c2simd/spec/c_sources/raw/blake2b_compress"
+	raw_xor "code.hazyhaar.fr/devhoros/c2simd/spec/c_sources/raw/fast_xor"
+	raw_md5 "code.hazyhaar.fr/devhoros/c2simd/spec/c_sources/raw/md5_transform"
+	raw_sip "code.hazyhaar.fr/devhoros/c2simd/spec/c_sources/raw/siphash24"
 
 	"modernc.org/libc"
 )

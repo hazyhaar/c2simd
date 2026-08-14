@@ -481,9 +481,9 @@ func Fast_xor_bytes(tls *libc.TLS, dst uintptr, src1 uintptr, src2 uintptr, len1
 		if !(i+uint64(8) <= len1) {
 			break
 		}
-		w1 = **(**uint64_t)(__ccgo_up(src1 + uintptr(i/uint64(8))*8))
-		w2 = **(**uint64_t)(__ccgo_up(src2 + uintptr(i/uint64(8))*8))
-		**(**uint64_t)(__ccgo_up(dst + uintptr(i/uint64(8))*8)) = w1 ^ w2
+		w1 = *(*uint64_t)(unsafe.Pointer(src1 + uintptr(i/uint64(8))*8))
+		w2 = *(*uint64_t)(unsafe.Pointer(src2 + uintptr(i/uint64(8))*8))
+		*(*uint64_t)(unsafe.Pointer(dst + uintptr(i/uint64(8))*8)) = w1 ^ w2
 		goto _1
 	_1:
 		;
@@ -493,14 +493,10 @@ func Fast_xor_bytes(tls *libc.TLS, dst uintptr, src1 uintptr, src2 uintptr, len1
 		if !(i < len1) {
 			break
 		}
-		**(**uint8_t)(__ccgo_up(dst + uintptr(i))) = libc.Uint8FromInt32(libc.Int32FromUint8(**(**uint8_t)(__ccgo_up(src1 + uintptr(i)))) ^ libc.Int32FromUint8(**(**uint8_t)(__ccgo_up(src2 + uintptr(i)))))
+		*(*uint8_t)(unsafe.Pointer(dst + uintptr(i))) = libc.Uint8FromInt32(libc.Int32FromUint8(*(*uint8_t)(unsafe.Pointer(src1 + uintptr(i)))) ^ libc.Int32FromUint8(*(*uint8_t)(unsafe.Pointer(src2 + uintptr(i)))))
 		goto _2
 	_2:
 		;
 		i = i + 1
 	}
-}
-
-func __ccgo_up(n uintptr) unsafe.Pointer {
-	return unsafe.Pointer(&n)
 }

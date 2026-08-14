@@ -6,7 +6,7 @@ import (
 	"math/bits"
 	"testing"
 
-	"github.com/hazyhaar/c2simd"
+	"code.hazyhaar.fr/devhoros/c2simd"
 	"simd/archsimd"
 )
 

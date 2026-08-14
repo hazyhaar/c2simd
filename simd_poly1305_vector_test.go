@@ -7,7 +7,7 @@ import (
 	"crypto/rand"
 	"testing"
 
-	"github.com/hazyhaar/c2simd"
+	"code.hazyhaar.fr/devhoros/c2simd"
 	"golang.org/x/crypto/poly1305"
 )
 

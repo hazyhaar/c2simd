@@ -2,3 +2,26 @@
 *.pprof
 *.out
 bin/
+bench_history.jsonl
+
+# Clones / lab hors pipeline gen (c2simd v2)
+spec/c_sources/upstream/
+spec/c_sources/ann_lab/
+
+# Dump brut capté — canonique = upstream/ (voir sources/README.md)
+sources/*
+!sources/README.md
+
+# Artefacts de build dogfood
+spec/dogfood/testdata/cycles/**/build_raw/
+spec/dogfood/testdata/cycles/**/build_opt/
+spec/dogfood/testdata/cycles/**/build/
+spec/dogfood/testdata/cycles/**/*.err
+# Cycles tribench éphémères (stamps horodatés) — ne pas versionner en masse
+spec/dogfood/testdata/cycles/tribench_*/
+# Autres cycles / bench locaux non canoniques
+spec/dogfood/testdata/cycles/bench_c_ccgo_sgo_*/
+spec/dogfood/testdata/cycles/202608*/
+sgoiter/spec/bench/probe_smoke/
+sgoiter/spec/bench/probe_*/stderr.txt
+sgoiter/spec/bench/probe_*/PROBE_console.md
