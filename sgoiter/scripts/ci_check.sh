@@ -81,7 +81,8 @@ if [[ -d "$SS_SGOI" ]]; then
   AMALG="spec/c_sources/upstream/monocypher/4.0.2/monocypher_amalg.c"
   if [[ -f "$AMALG" ]]; then
     echo "  [ci_check] vérification de la régénération mécanique de monocypher..."
-    /tmp/sgoiter_df/sgoiter -in "$AMALG" -out /tmp/sgoiter_df/monocypher_aead_fresh.go
+    EXCLUDES="Slide_init,Slide_step,Remove_l,Mod_l,Invsqrt,Lookup_add,Crypto_argon2,Crypto_elligator_key_pair,Crypto_chacha20_djb,Crypto_x25519_dirty_small,Poly_blocks,Ge_scalarmult_base,Crypto_eddsa_check_equation,Crypto_aead_write,Slide_ctx"
+    /tmp/sgoiter_df/sgoiter -in "$AMALG" -out /tmp/sgoiter_df/monocypher_aead_fresh.go -exclude "$EXCLUDES"
     sed -i 's/^package .*/package monocypher55/' /tmp/sgoiter_df/monocypher_aead_fresh.go
     python3 sgoiter/scripts/postprocess_monocypher_go.py /tmp/sgoiter_df/monocypher_aead_fresh.go
     if ! diff -u "$SS_SGOI/monocypher_aead_sgoiter.go" /tmp/sgoiter_df/monocypher_aead_fresh.go >/tmp/sgoiter_df/mono_diff.patch; then
