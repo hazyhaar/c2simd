@@ -25,9 +25,10 @@ const (
 
 // Options for Emit.
 type Options struct {
-	Profile  Profile
-	Mode     Mode
-	PreferIR bool // skip kernel body overrides (absorb path)
+	Profile        Profile
+	Mode           Mode
+	PreferIR       bool     // skip kernel body overrides (absorb path)
+	ExcludeSymbols []string // symboles exclus de l'émission (surpassés par hand_*.go)
 }
 
 // Emit is EmitOpts with safe mode (compat).
@@ -97,7 +98,19 @@ func EmitOpts(m *ir.Module, opt Options) (string, error) {
 			glens[nm] = int64(len(g.Data))
 		}
 	}
+	excludeMap := make(map[string]bool, len(opt.ExcludeSymbols)*2)
+	for _, s := range opt.ExcludeSymbols {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			excludeMap[s] = true
+			excludeMap[exportName(s)] = true
+		}
+	}
+
 	for i := range m.Funcs {
+		if excludeMap[m.Funcs[i].Name] || excludeMap[exportName(m.Funcs[i].Name)] {
+			continue
+		}
 		e := newEnv(&m.Funcs[i])
 		e.callees = callees
 		e.goName = goName
@@ -154,6 +167,9 @@ func EmitOpts(m *ir.Module, opt Options) (string, error) {
 	}
 	// struct types
 	for _, st := range m.Structs {
+		if excludeMap[st.Name] || excludeMap[exportName(st.Name)] {
+			continue
+		}
 		fmt.Fprintf(&b, "type %s struct {\n", exportName(st.Name))
 		for _, f := range st.Fields {
 			fn := sanitizeIdent(f.Name)

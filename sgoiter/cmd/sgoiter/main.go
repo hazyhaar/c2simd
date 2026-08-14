@@ -24,6 +24,7 @@ func main() {
 	preferIR := fs.Bool("prefer-ir", false, "skip body overrides (fnv/blake/…) — absorb/debug")
 	rootsOnly := fs.Bool("roots-only", false, "n'émettre que les racines et leur clôture d'appels (défaut : les fonctions non-static)")
 	roots := fs.String("roots", "", "racines explicites, séparées par des virgules (implique -roots-only)")
+	exclude := fs.String("exclude", "", "symboles ou structures à exclure de l'émission, séparés par des virgules")
 	_ = fs.Parse(os.Args[1:])
 
 	if *in == "" || *out == "" {
@@ -91,7 +92,21 @@ func main() {
 		}
 	}
 
-	src, err := emit.EmitOpts(m, emit.Options{Profile: emit.ProfileGo127, Mode: emMode, PreferIR: *preferIR})
+	var excludedList []string
+	if *exclude != "" {
+		for _, s := range strings.Split(*exclude, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				excludedList = append(excludedList, s)
+			}
+		}
+	}
+
+	src, err := emit.EmitOpts(m, emit.Options{
+		Profile:        emit.ProfileGo127,
+		Mode:           emMode,
+		PreferIR:       *preferIR,
+		ExcludeSymbols: excludedList,
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
