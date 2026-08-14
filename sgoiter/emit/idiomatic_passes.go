@@ -1,6 +1,7 @@
 package emit
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -372,6 +373,157 @@ var (
 func archSimplifyDoubleNegations(src string) string {
 	src = reNotNotEq.ReplaceAllString(src, `$1 == 0`)
 	src = reNotEq.ReplaceAllString(src, `$1 != 0`)
+	return src
+}
+
+var (
+	reGap16      = regexp.MustCompile(`Gap\(([^,]+),\s*uint64\(16\)\)`)
+	reGap16Plain = regexp.MustCompile(`Gap\(([^,]+),\s*16\)`)
+)
+
+// archFoldGapLiteralConstants simplifie Gap(x, 16) en (-x) & 15.
+func archFoldGapLiteralConstants(src string) string {
+	src = reGap16.ReplaceAllString(src, `(-$1) & 15`)
+	src = reGap16Plain.ReplaceAllString(src, `(-$1) & 15`)
+	return src
+}
+
+// archUnrollBlake2bSigma déroule les 12 tours de Blake2b en substituant la table sigma par des immédiats constants.
+func archUnrollBlake2bSigma(src string) string {
+	idx := strings.Index(src, "for v91 < 12 {")
+	if idx == -1 {
+		return src
+	}
+	endPattern := "ctx.Hash[0] ^="
+	endRel := strings.Index(src[idx:], endPattern)
+	if endRel == -1 {
+		return src
+	}
+	loopChunk := src[idx : idx+endRel]
+	lastBrace := strings.LastIndex(loopChunk, "}")
+	if lastBrace == -1 {
+		return src
+	}
+	targetBlock := src[idx : idx+lastBrace+1]
+
+	var unrolled strings.Builder
+	for r := 0; r < 12; r++ {
+		fmt.Fprintf(&unrolled, "\t// Blake2b Tour %d (déroulage ARCHTIME sigma)\n", r)
+		unrolled.WriteString(fmt.Sprintf("\tv20 += (v48 + ctx.Input[%d])\n", blake2bSigma[r][0]))
+		unrolled.WriteString("\tv52 = bits.RotateLeft64((v52 ^ v20), -32)\n")
+		unrolled.WriteString("\tv24 += v52\n")
+		unrolled.WriteString("\tv48 = bits.RotateLeft64((v48 ^ v24), -24)\n")
+		unrolled.WriteString(fmt.Sprintf("\tv20 += (v48 + ctx.Input[%d])\n", blake2bSigma[r][1]))
+		unrolled.WriteString("\tv52 = bits.RotateLeft64((v52 ^ v20), -16)\n")
+		unrolled.WriteString("\tv24 += v52\n")
+		unrolled.WriteString("\tv48 = bits.RotateLeft64((v48 ^ v24), -63)\n")
+
+		unrolled.WriteString(fmt.Sprintf("\tv27 += (v59 + ctx.Input[%d])\n", blake2bSigma[r][2]))
+		unrolled.WriteString("\tv63 = bits.RotateLeft64((v63 ^ v27), -32)\n")
+		unrolled.WriteString("\tv31 += v63\n")
+		unrolled.WriteString("\tv59 = bits.RotateLeft64((v59 ^ v31), -24)\n")
+		unrolled.WriteString(fmt.Sprintf("\tv27 += (v59 + ctx.Input[%d])\n", blake2bSigma[r][3]))
+		unrolled.WriteString("\tv63 = bits.RotateLeft64((v63 ^ v27), -16)\n")
+		unrolled.WriteString("\tv31 += v63\n")
+		unrolled.WriteString("\tv59 = bits.RotateLeft64((v59 ^ v31), -63)\n")
+
+		unrolled.WriteString(fmt.Sprintf("\tv34 += (v70 + ctx.Input[%d])\n", blake2bSigma[r][4]))
+		unrolled.WriteString("\tv74 = bits.RotateLeft64((v74 ^ v34), -32)\n")
+		unrolled.WriteString("\tv38 += v74\n")
+		unrolled.WriteString("\tv70 = bits.RotateLeft64((v70 ^ v38), -24)\n")
+		unrolled.WriteString(fmt.Sprintf("\tv34 += (v70 + ctx.Input[%d])\n", blake2bSigma[r][5]))
+		unrolled.WriteString("\tv74 = bits.RotateLeft64((v74 ^ v34), -16)\n")
+		unrolled.WriteString("\tv38 += v74\n")
+		unrolled.WriteString("\tv70 = bits.RotateLeft64((v70 ^ v38), -63)\n")
+
+		unrolled.WriteString(fmt.Sprintf("\tv41 += (v82 + ctx.Input[%d])\n", blake2bSigma[r][6]))
+		unrolled.WriteString("\tv86 = bits.RotateLeft64((v86 ^ v41), -32)\n")
+		unrolled.WriteString("\tv45 += v86\n")
+		unrolled.WriteString("\tv82 = bits.RotateLeft64((v82 ^ v45), -24)\n")
+		unrolled.WriteString(fmt.Sprintf("\tv41 += (v82 + ctx.Input[%d])\n", blake2bSigma[r][7]))
+		unrolled.WriteString("\tv86 = bits.RotateLeft64((v86 ^ v41), -16)\n")
+		unrolled.WriteString("\tv45 += v86\n")
+		unrolled.WriteString("\tv82 = bits.RotateLeft64((v82 ^ v45), -63)\n")
+
+		unrolled.WriteString(fmt.Sprintf("\tv20 += (v59 + ctx.Input[%d])\n", blake2bSigma[r][8]))
+		unrolled.WriteString("\tv86 = bits.RotateLeft64((v86 ^ v20), -32)\n")
+		unrolled.WriteString("\tv38 += v86\n")
+		unrolled.WriteString("\tv59 = bits.RotateLeft64((v59 ^ v38), -24)\n")
+		unrolled.WriteString(fmt.Sprintf("\tv20 += (v59 + ctx.Input[%d])\n", blake2bSigma[r][9]))
+		unrolled.WriteString("\tv86 = bits.RotateLeft64((v86 ^ v20), -16)\n")
+		unrolled.WriteString("\tv38 += v86\n")
+		unrolled.WriteString("\tv59 = bits.RotateLeft64((v59 ^ v38), -63)\n")
+
+		unrolled.WriteString(fmt.Sprintf("\tv27 += (v70 + ctx.Input[%d])\n", blake2bSigma[r][10]))
+		unrolled.WriteString("\tv52 = bits.RotateLeft64((v52 ^ v27), -32)\n")
+		unrolled.WriteString("\tv45 += v52\n")
+		unrolled.WriteString("\tv70 = bits.RotateLeft64((v70 ^ v45), -24)\n")
+		unrolled.WriteString(fmt.Sprintf("\tv27 += (v70 + ctx.Input[%d])\n", blake2bSigma[r][11]))
+		unrolled.WriteString("\tv52 = bits.RotateLeft64((v52 ^ v27), -16)\n")
+		unrolled.WriteString("\tv45 += v52\n")
+		unrolled.WriteString("\tv70 = bits.RotateLeft64((v70 ^ v45), -63)\n")
+
+		unrolled.WriteString(fmt.Sprintf("\tv34 += (v82 + ctx.Input[%d])\n", blake2bSigma[r][12]))
+		unrolled.WriteString("\tv63 = bits.RotateLeft64((v63 ^ v34), -32)\n")
+		unrolled.WriteString("\tv24 += v63\n")
+		unrolled.WriteString("\tv82 = bits.RotateLeft64((v82 ^ v24), -24)\n")
+		unrolled.WriteString(fmt.Sprintf("\tv34 += (v82 + ctx.Input[%d])\n", blake2bSigma[r][13]))
+		unrolled.WriteString("\tv63 = bits.RotateLeft64((v63 ^ v34), -16)\n")
+		unrolled.WriteString("\tv24 += v63\n")
+		unrolled.WriteString("\tv82 = bits.RotateLeft64((v82 ^ v24), -63)\n")
+
+		unrolled.WriteString(fmt.Sprintf("\tv41 += (v48 + ctx.Input[%d])\n", blake2bSigma[r][14]))
+		unrolled.WriteString("\tv74 = bits.RotateLeft64((v74 ^ v41), -32)\n")
+		unrolled.WriteString("\tv31 += v74\n")
+		unrolled.WriteString("\tv48 = bits.RotateLeft64((v48 ^ v31), -24)\n")
+		unrolled.WriteString(fmt.Sprintf("\tv41 += (v48 + ctx.Input[%d])\n", blake2bSigma[r][15]))
+		unrolled.WriteString("\tv74 = bits.RotateLeft64((v74 ^ v41), -16)\n")
+		unrolled.WriteString("\tv31 += v74\n")
+		unrolled.WriteString("\tv48 = bits.RotateLeft64((v48 ^ v31), -63)\n")
+	}
+
+	src = strings.Replace(src, targetBlock, unrolled.String(), 1)
+	src = strings.Replace(src, "\tv91 = 0\n", "", 1)
+	return src
+}
+
+var lm2Bytes = [32]byte{
+	0xeb, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+	0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+}
+
+// archUnrollX25519InverseChain déroule l'exponentiation scalaire L-2 dans Crypto_x25519_inverse
+// en séquence straight-line constant-time sans aucune branche dynamique.
+func archUnrollX25519InverseChain(src string) string {
+	startMarker := "v28 = 252"
+	idx := strings.Index(src, startMarker)
+	if idx == -1 {
+		return src
+	}
+	endPattern := "v50 = 0"
+	endRel := strings.Index(src[idx:], endPattern)
+	if endRel == -1 {
+		return src
+	}
+	targetBlock := src[idx : idx+endRel]
+
+	var chain strings.Builder
+	chain.WriteString("\t// Chaîne d'addition ARCHTIME constant-time pour L-2 (253 étapes sans branche)\n")
+	for bit := 252; bit >= 0; bit-- {
+		bVal := (lm2Bytes[bit/8] >> (bit % 8)) & 1
+		chain.WriteString("\tclear(v27)\n")
+		chain.WriteString("\tMultiply(v27, v6, v6)\n")
+		chain.WriteString("\tRedc(v6, v27)\n")
+		if bVal == 1 {
+			chain.WriteString("\tclear(v27)\n")
+			chain.WriteString("\tMultiply(v27, v6, v9)\n")
+			chain.WriteString("\tRedc(v6, v27)\n")
+		}
+	}
+
+	src = strings.Replace(src, targetBlock, chain.String(), 1)
 	return src
 }
 

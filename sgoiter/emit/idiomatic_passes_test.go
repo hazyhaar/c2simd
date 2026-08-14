@@ -1,6 +1,7 @@
 package emit
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -157,4 +158,36 @@ func TestArchSimplifyDoubleNegations(t *testing.T) {
 		t.Errorf("archSimplifyDoubleNegations = %q; want %q", got, want)
 	}
 }
+
+func TestArchFoldGapLiteralConstants(t *testing.T) {
+	in := "\tgap := Gap(ad_size, uint64(16))\n\tgap2 := Gap(text_size, 16)"
+	want := "\tgap := (-ad_size) & 15\n\tgap2 := (-text_size) & 15"
+	got := archFoldGapLiteralConstants(in)
+	if got != want {
+		t.Errorf("archFoldGapLiteralConstants = %q; want %q", got, want)
+	}
+}
+
+func TestArchUnrollBlake2bSigma(t *testing.T) {
+	in := "\tv91 = 0\n\tfor v91 < 12 {\n\t\tv20 += ctx.Input[blake2b_compress_sigma[0]]\n\t}\n\tctx.Hash[0] ^="
+	got := archUnrollBlake2bSigma(in)
+	if strings.Contains(got, "blake2b_compress_sigma") || strings.Contains(got, "for v91 < 12") {
+		t.Errorf("archUnrollBlake2bSigma still contains dynamic loop/table: %s", got)
+	}
+	if !strings.Contains(got, "Blake2b Tour 0") || !strings.Contains(got, "Blake2b Tour 11") {
+		t.Errorf("archUnrollBlake2bSigma does not contain unrolled rounds: %s", got)
+	}
+}
+
+func TestArchUnrollX25519InverseChain(t *testing.T) {
+	in := "\tv28 = 252\n\tfor v28 >= 0 {\n\t\tMultiply(v27, v6, v6)\n\t}\n\tv50 = 0"
+	got := archUnrollX25519InverseChain(in)
+	if strings.Contains(got, "v28 = 252") || strings.Contains(got, "for v28 >= 0") {
+		t.Errorf("archUnrollX25519InverseChain still contains dynamic loop: %s", got)
+	}
+	if !strings.Contains(got, "Chaîne d'addition ARCHTIME constant-time pour L-2") {
+		t.Errorf("archUnrollX25519InverseChain does not contain addition chain: %s", got)
+	}
+}
+
 
