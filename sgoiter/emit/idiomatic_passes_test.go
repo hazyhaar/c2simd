@@ -139,3 +139,22 @@ func TestArchPowerOfTwoShifts(t *testing.T) {
 		t.Errorf("archPowerOfTwoShifts = %q; want %q", got, want)
 	}
 }
+
+func TestArchFoldRotateLeftConstants(t *testing.T) {
+	in := "\tv1 := bits.RotateLeft64(x, 64-24)\n\tv2 := bits.RotateLeft32(y, 32-12)"
+	want := "\tv1 := bits.RotateLeft64(x, -24)\n\tv2 := bits.RotateLeft32(y, -12)"
+	got := archFoldRotateLeftConstants(in)
+	if got != want {
+		t.Errorf("archFoldRotateLeftConstants = %q; want %q", got, want)
+	}
+}
+
+func TestArchSimplifyDoubleNegations(t *testing.T) {
+	in := "\tif !(v17 != 0) { return 0 }\n\tif !(flag == 0) { break }"
+	want := "\tif v17 == 0 { return 0 }\n\tif flag != 0 { break }"
+	got := archSimplifyDoubleNegations(in)
+	if got != want {
+		t.Errorf("archSimplifyDoubleNegations = %q; want %q", got, want)
+	}
+}
+

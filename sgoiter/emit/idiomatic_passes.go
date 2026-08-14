@@ -350,3 +350,28 @@ var reLitCastComp = regexp.MustCompile(`(==|!=)\s*(?:uint64|uint32|uint8|int64|i
 func archStripRedundantLiteralCasts(src string) string {
 	return reLitCastComp.ReplaceAllString(src, `$1 $2`)
 }
+
+var (
+	reRotl64Const = regexp.MustCompile(`bits\.RotateLeft64\(([^,]+),\s*64\s*-\s*(\d+)\)`)
+	reRotl32Const = regexp.MustCompile(`bits\.RotateLeft32\(([^,]+),\s*32\s*-\s*(\d+)\)`)
+)
+
+// archFoldRotateLeftConstants simplifie bits.RotateLeft64(x, 64-N) en bits.RotateLeft64(x, -N).
+func archFoldRotateLeftConstants(src string) string {
+	src = reRotl64Const.ReplaceAllString(src, `bits.RotateLeft64($1, -$2)`)
+	src = reRotl32Const.ReplaceAllString(src, `bits.RotateLeft32($1, -$2)`)
+	return src
+}
+
+var (
+	reNotNotEq = regexp.MustCompile(`!\(([A-Za-z0-9_.]+)\s*!=\s*0\)`)
+	reNotEq    = regexp.MustCompile(`!\(([A-Za-z0-9_.]+)\s*==\s*0\)`)
+)
+
+// archSimplifyDoubleNegations simplifie !(v != 0) en v == 0.
+func archSimplifyDoubleNegations(src string) string {
+	src = reNotNotEq.ReplaceAllString(src, `$1 == 0`)
+	src = reNotEq.ReplaceAllString(src, `$1 != 0`)
+	return src
+}
+

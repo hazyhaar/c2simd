@@ -811,6 +811,8 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 	stripped = archStripIndexIntCasts(stripped)
 	stripped = archFoldPingPongCasts(stripped)
 	stripped = archStripRedundantLiteralCasts(stripped)
+	stripped = archFoldRotateLeftConstants(stripped)
+	stripped = archSimplifyDoubleNegations(stripped)
 	stripped = archBuiltinMinMax(stripped)
 	stripped = archBalanceAdditionTrees(stripped)
 	stripped = archPowerOfTwoShifts(stripped)
