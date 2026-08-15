@@ -138,7 +138,7 @@ func AEADLockSIMD256_FusedDst(dstBuffer []byte, outMac *[16]byte, key, nonce, ad
 	var zeroBlock [64]byte
 	EncryptChaCha20_SIMD256(subKeyBlock[:], derivedNonce[:], 0, zeroBlock[:], polyKeyBlock[:])
 
-	polySt := NewPoly1305QuadChain(polyKeyBlock[:32])
+	polySt := newPolyMAC(polyKeyBlock[:32], len(plaintext)+len(ad))
 
 	// 4. Cadrage Poly1305 : AD + zeroPad16(AD)
 	if len(ad) > 0 {
@@ -238,7 +238,7 @@ func AEADUnlockSIMD256_FusedDst(dstBuffer []byte, key, nonce, ad, ciphertext, ma
 	var zeroBlock [64]byte
 	EncryptChaCha20_SIMD256(subKeyBlock[:], derivedNonce[:], 0, zeroBlock[:], polyKeyBlock[:])
 
-	polySt := NewPoly1305QuadChain(polyKeyBlock[:32])
+	polySt := newPolyMAC(polyKeyBlock[:32], len(ciphertext)+len(ad))
 
 	if len(ad) > 0 {
 		polySt.Update(ad)

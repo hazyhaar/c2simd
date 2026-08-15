@@ -8,8 +8,11 @@ cd "$MOD"
 OUT="spec/dogfood/testdata/cycles/20260810k_monocypher/sgoiter_out"
 AMALG="spec/c_sources/upstream/monocypher/4.0.2/monocypher_amalg.c"
 mkdir -p "$OUT"
-EXCLUDES="Slide_init,Slide_step,Remove_l,Mod_l,Invsqrt,Lookup_add,Crypto_argon2,Crypto_elligator_key_pair,Crypto_chacha20_djb,Crypto_x25519_dirty_small,Poly_blocks,Ge_scalarmult_base,Crypto_eddsa_check_equation,Crypto_aead_write,Crypto_aead_read,Slide_ctx,Scalarmult"
-./bin/sgoiter -in "$AMALG" -out "$OUT/monocypher_aead_sgoiter.go" -exclude "$EXCLUDES"
+# Crypto_chacha20_h : strate main depuis le chantier blocs courts (hand_hchacha.go).
+EXCLUDES="Slide_init,Slide_step,Remove_l,Mod_l,Invsqrt,Lookup_add,Crypto_argon2,Crypto_elligator_key_pair,Crypto_chacha20_djb,Crypto_chacha20_h,Crypto_x25519_dirty_small,Poly_blocks,Ge_scalarmult_base,Crypto_eddsa_check_equation,Crypto_aead_write,Crypto_aead_read,Slide_ctx,Scalarmult"
+# strip + keep-list : alignés sur ci_check.sh (globales et types consommés par les strates main).
+KEEP="zero,chacha20_constant,half_mod_L,half_ones,dirty_base_point,Crypto_argon2_config,Crypto_argon2_inputs,Crypto_argon2_extras"
+./bin/sgoiter -in "$AMALG" -out "$OUT/monocypher_aead_sgoiter.go" -exclude "$EXCLUDES" -strip-dead-globals -keep-globals "$KEEP"
 sed -i 's/^package .*/package monocypher_amalg/' "$OUT/monocypher_aead_sgoiter.go"
 python3 sgoiter/scripts/postprocess_monocypher_go.py "$OUT/monocypher_aead_sgoiter.go"
 gofmt -w "$OUT/monocypher_aead_sgoiter.go"
@@ -29,6 +32,7 @@ if [[ -d "$DST" ]]; then
            hand_chacha_simd.go chacha20_simd_amd64.go chacha20_simd_fallback.go \
            hand_poly1305_simd.go \
            hand_aead_fused.go \
+           hand_hchacha.go hand_chacha_short_simd.go hand_chacha_short_fallback.go \
            hand_x25519_dirty_small.go \
            hand_curve25519_donna.go \
            ge_scalarmult_base.go eddsa_check_equation.go \

@@ -81,8 +81,15 @@ if [[ -d "$SS_SGOI" ]]; then
   AMALG="spec/c_sources/upstream/monocypher/4.0.2/monocypher_amalg.c"
   if [[ -f "$AMALG" ]]; then
     echo "  [ci_check] vérification de la régénération mécanique de monocypher..."
-    EXCLUDES="Slide_init,Slide_step,Remove_l,Mod_l,Invsqrt,Lookup_add,Crypto_argon2,Crypto_elligator_key_pair,Crypto_chacha20_djb,Crypto_x25519_dirty_small,Poly_blocks,Ge_scalarmult_base,Crypto_eddsa_check_equation,Crypto_aead_write,Crypto_aead_read,Slide_ctx,Scalarmult"
-    /tmp/sgoiter_df/sgoiter -in "$AMALG" -out /tmp/sgoiter_df/monocypher_aead_fresh.go -exclude "$EXCLUDES"
+    # Crypto_chacha20_h : strate main (hand_hchacha.go) depuis le chantier blocs courts.
+    EXCLUDES="Slide_init,Slide_step,Remove_l,Mod_l,Invsqrt,Lookup_add,Crypto_argon2,Crypto_elligator_key_pair,Crypto_chacha20_djb,Crypto_chacha20_h,Crypto_x25519_dirty_small,Poly_blocks,Ge_scalarmult_base,Crypto_eddsa_check_equation,Crypto_aead_write,Crypto_aead_read,Slide_ctx,Scalarmult"
+    # -strip-dead-globals + keep-list : les strates hand du corpus consomment
+    # quatre globales émises (recensement lot 4, 2026-08-15 : zero ×4 fichiers,
+    # half_mod_L/half_ones dans ge_scalarmult_base.go, dirty_base_point dans
+    # hand_x25519_dirty_small.go) — tout le reste est mort et tombe.
+    # (+ types : la passe strip couvre aussi les types morts — S25/S26 tombent ;
+    #  les trois types argon2 sont consommés par hand_argon2.go, keep nommément.)
+    /tmp/sgoiter_df/sgoiter -in "$AMALG" -out /tmp/sgoiter_df/monocypher_aead_fresh.go -exclude "$EXCLUDES" -strip-dead-globals -keep-globals "zero,chacha20_constant,half_mod_L,half_ones,dirty_base_point,Crypto_argon2_config,Crypto_argon2_inputs,Crypto_argon2_extras"
     OUT_DOGFOOD="spec/dogfood/testdata/cycles/20260810k_monocypher/sgoiter_out/monocypher_aead_sgoiter.go"
     sed -i 's/^package .*/package monocypher_amalg/' /tmp/sgoiter_df/monocypher_aead_fresh.go
     python3 sgoiter/scripts/postprocess_monocypher_go.py /tmp/sgoiter_df/monocypher_aead_fresh.go
@@ -123,8 +130,13 @@ fi
 echo "== secretstream55 bench gate performance floor =="
 SS_DIR="$MOD/../pkg/secretstream55"
 if [[ -d "$SS_DIR" ]]; then
-  (cd "$SS_DIR" && go test -v -count=1 -run TestBenchGate_PerformanceFloor .)
-  echo "  OK secretstream55 bench gate >= 2000 MB/s (ref 8164952)"
+  # Épinglage P-cores (i9-14900K : CPU 0-15 ; E-cores 16-31 à 4,4 GHz) — sans lui,
+  # le même banc rend deux modes à ±15 % selon le placement de l'ordonnanceur.
+  PIN=""
+  if command -v taskset >/dev/null; then PIN="taskset -c 0-15"; fi
+  sleep 1
+  (cd "$SS_DIR" && $PIN go test -v -count=1 -run TestBenchGate_PerformanceFloor .)
+  echo "  OK secretstream55 bench gate >= 2000 MB/s (ref 8164952, P-cores épinglés)"
 fi
 
 echo "sgoiter ci_check OK"

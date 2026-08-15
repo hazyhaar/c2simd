@@ -60,7 +60,10 @@ func classifyDecl(decl ast.Decl) string {
 		switch {
 		case strings.HasPrefix(low, "crypto_poly1305") || strings.HasPrefix(low, "poly_"):
 			return DomainPoly
-		case strings.HasPrefix(low, "crypto_blake2b") || strings.HasPrefix(low, "blake_") || strings.HasPrefix(low, "extended_hash"):
+		// blake2b_ (sans préfixe crypto_) : Blake2b_compress (~800 lignes)
+		// tombait dans utils faute de motif — audit 2026-08-15.
+		case strings.HasPrefix(low, "crypto_blake2b") || strings.HasPrefix(low, "blake2b_") ||
+			strings.HasPrefix(low, "blake_") || strings.HasPrefix(low, "extended_hash"):
 			return DomainBlake
 		case strings.HasPrefix(low, "crypto_chacha20") || strings.HasPrefix(low, "chacha20_"):
 			return DomainChacha

@@ -126,58 +126,10 @@ func archStripIndexIntCasts(src string) string {
 	return src
 }
 
-var (
-	// Nested IIFE min/max:
-	// func() T { if (func() int { if a OP b { return 1 }; return 0 }()) != 0 { return ret1 }; return ret2 }()
-	reMinMaxIIFENested = regexp.MustCompile(`(?s)func\(\)\s*(\w+)\s*\{\s*if\s*\(func\(\)\s*int\s*\{\s*if\s*(.*?)\s*(<=|<|>=|>)\s*([^{]+?)\s*\{\s*return\s+1\s*\};\s*return\s+0\s*\}\(\)\)\s*!=\s*0\s*\{\s*return\s+([^;]+?)\s*\};\s*return\s+([^;]+?)\s*\}\(\)`)
-	// Simple IIFE min/max:
-	// func() T { if a OP b { return ret1 }; return ret2 }()
-	reMinMaxIIFESimple = regexp.MustCompile(`(?s)func\(\)\s*(\w+)\s*\{\s*if\s*(.*?)\s*(<=|<|>=|>)\s*([^{]+?)\s*\{\s*return\s+([^;]+?)\s*\};\s*return\s+([^;]+?)\s*\}\(\)`)
-)
-
-// archBuiltinMinMax transforme les IIFE ternaires de min/max (<, <=, >, >=) en appels aux fonctions intégrées min(a, b) et max(a, b).
-func archBuiltinMinMax(src string) string {
-	reCast := regexp.MustCompile(`^(?:uint64|uint32|uint16|uint8|int64|int32|int16|int8|int|uintptr)\((.+)\)$`)
-	clean := func(s string) string {
-		s = strings.ReplaceAll(strings.TrimSpace(s), " ", "")
-		return reCast.ReplaceAllString(s, "$1")
-	}
-
-	process := func(m string, parts []string) string {
-		if len(parts) >= 7 {
-			a, op, b := strings.TrimSpace(parts[2]), strings.TrimSpace(parts[3]), strings.TrimSpace(parts[4])
-			ret1, ret2 := strings.TrimSpace(parts[5]), strings.TrimSpace(parts[6])
-			ca, cb, cr1, cr2 := clean(a), clean(b), clean(ret1), clean(ret2)
-			switch op {
-			case "<", "<=":
-				if ca == cr1 && cb == cr2 {
-					return "min(" + ret1 + ", " + ret2 + ")"
-				}
-				if ca == cr2 && cb == cr1 {
-					return "max(" + ret2 + ", " + ret1 + ")"
-				}
-			case ">", ">=":
-				if ca == cr1 && cb == cr2 {
-					return "max(" + ret1 + ", " + ret2 + ")"
-				}
-				if ca == cr2 && cb == cr1 {
-					return "min(" + ret2 + ", " + ret1 + ")"
-				}
-			}
-		}
-		return m
-	}
-
-	src = reMinMaxIIFENested.ReplaceAllStringFunc(src, func(m string) string {
-		return process(m, reMinMaxIIFENested.FindStringSubmatch(m))
-	})
-
-	src = reMinMaxIIFESimple.ReplaceAllStringFunc(src, func(m string) string {
-		return process(m, reMinMaxIIFESimple.FindStringSubmatch(m))
-	})
-
-	return src
-}
+// La transformation des IIFE ternaires min/max vit désormais dans
+// astBuiltinMinMax (ast_idiomatic_passes.go) : la variante regex effaçait les
+// casts avant d'apparier les branches, ce qui changeait la sémantique d'une
+// comparaison tronquée (défaut démontré par oracle, audit 2026-08-15).
 
 // archBalanceAdditionTrees rééquilibre les longues chaînes d'addition associatives gauches
 // (((((a + b) + c) + d) ...)) en arbres équilibrés ((a+b)+(c+d)) pour diviser par deux
@@ -371,29 +323,14 @@ func archFoldRotateLeftConstants(src string) string {
 	return src
 }
 
-var (
-	reNotNotEq = regexp.MustCompile(`!\(([A-Za-z0-9_.]+)\s*!=\s*0\)`)
-	reNotEq    = regexp.MustCompile(`!\(([A-Za-z0-9_.]+)\s*==\s*0\)`)
-)
+// Le pliage des négations de comparaison vit désormais dans
+// astSimplifyNegatedComparisons (ast_more_passes.go) : la variante regex ne
+// couvrait que les identifiants — !(Invsqrt(...) != 0) survivait (audit
+// 2026-08-15).
 
-// archSimplifyDoubleNegations simplifie !(v != 0) en v == 0.
-func archSimplifyDoubleNegations(src string) string {
-	src = reNotNotEq.ReplaceAllString(src, `$1 == 0`)
-	src = reNotEq.ReplaceAllString(src, `$1 != 0`)
-	return src
-}
-
-var (
-	reGap16      = regexp.MustCompile(`Gap\(([^,]+),\s*uint64\(16\)\)`)
-	reGap16Plain = regexp.MustCompile(`Gap\(([^,]+),\s*16\)`)
-)
-
-// archFoldGapLiteralConstants simplifie Gap(x, 16) en (-x) & 15.
-func archFoldGapLiteralConstants(src string) string {
-	src = reGap16.ReplaceAllString(src, `(-$1) & 15`)
-	src = reGap16Plain.ReplaceAllString(src, `(-$1) & 15`)
-	return src
-}
+// Le repli de Gap(x, 16) vit désormais dans astFoldGapLiteralConstants
+// (ast_idiomatic_passes.go) : la variante regex ne parenthésait pas l'argument
+// ((-a + b) & 15 pour Gap(a+b, 16)) — défaut latent démontré, audit 2026-08-15.
 
 // archUnrollBlake2bSigma déroule les 12 tours de Blake2b en substituant la table sigma par des immédiats constants.
 func archUnrollBlake2bSigma(src string) string {
@@ -501,9 +438,27 @@ var lm2Bytes = [32]byte{
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
 }
 
-// archUnrollX25519InverseChain déroule l'exponentiation scalaire L-2 dans Crypto_x25519_inverse
-// en séquence straight-line constant-time sans aucune branche dynamique.
-func archUnrollX25519InverseChain(src string) string {
+func lm2BytesGoLit(indent string) string {
+	var b strings.Builder
+	b.WriteString("[32]byte{\n")
+	for i := 0; i < 32; i += 8 {
+		b.WriteString(indent)
+		for j := 0; j < 8; j++ {
+			if j > 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprintf(&b, "0x%02x", lm2Bytes[i+j])
+		}
+		b.WriteString(",\n")
+	}
+	b.WriteString(indent[:len(indent)-1])
+	b.WriteString("}")
+	return b.String()
+}
+
+// archEmitX25519InverseLm2Loop remplace la boucle d'exponentiation L-2
+// (Crypto_x25519_inverse) par une boucle compacte sur la table publique lm2Bytes.
+func archEmitX25519InverseLm2Loop(src string) string {
 	startMarker := "v28 = 252"
 	idx := strings.Index(src, startMarker)
 	if idx == -1 {
@@ -518,7 +473,6 @@ func archUnrollX25519InverseChain(src string) string {
 	if openBrace == -1 {
 		return src
 	}
-	// Comptage de profondeur pour trouver l'accolade fermante exacte de la boucle for
 	depth := 0
 	endRel := -1
 	for pos := loopIdx + openBrace; pos < len(src); pos++ {
@@ -542,22 +496,25 @@ func archUnrollX25519InverseChain(src string) string {
 		varName = "v6"
 	}
 
-	var chain strings.Builder
-	chain.WriteString("\t// Chaîne d'addition ARCHTIME constant-time pour L-2 (253 étapes sans branche)\n")
-	for bit := 252; bit >= 0; bit-- {
-		bVal := (lm2Bytes[bit/8] >> (bit % 8)) & 1
-		chain.WriteString("\tclear(v27[:])\n")
-		fmt.Fprintf(&chain, "\tMultiply(v27[:], %s[:], %s[:])\n", varName, varName)
-		fmt.Fprintf(&chain, "\tRedc(%s[:], v27[:])\n", varName)
-		if bVal == 1 {
-			chain.WriteString("\tclear(v27[:])\n")
-			fmt.Fprintf(&chain, "\tMultiply(v27[:], %s[:], v9[:])\n", varName)
-			fmt.Fprintf(&chain, "\tRedc(%s[:], v27[:])\n", varName)
-		}
-	}
+	var loop strings.Builder
+	loop.WriteString("\t// L-2 (ordre du groupe Ed25519 moins 2) est une constante publique.\n")
+	loop.WriteString("\t// Le test de bit sur cette table ne fuit aucune donnée secrète :\n")
+	loop.WriteString("\t// Montgomery ladder sur exposant public — le if est admissible.\n")
+	loop.WriteString("\tvar lm2Bytes = ")
+	loop.WriteString(lm2BytesGoLit("\t\t"))
+	loop.WriteString("\n")
+	loop.WriteString("\tfor bit := 252; bit >= 0; bit-- {\n")
+	loop.WriteString("\t\tclear(v27[:])\n")
+	fmt.Fprintf(&loop, "\t\tMultiply(v27[:], %s[:], %s[:])\n", varName, varName)
+	fmt.Fprintf(&loop, "\t\tRedc(%s[:], v27[:])\n", varName)
+	loop.WriteString("\t\tif (lm2Bytes[bit/8]>>(bit%8))&1 != 0 {\n")
+	loop.WriteString("\t\t\tclear(v27[:])\n")
+	fmt.Fprintf(&loop, "\t\t\tMultiply(v27[:], %s[:], v9[:])\n", varName)
+	fmt.Fprintf(&loop, "\t\t\tRedc(%s[:], v27[:])\n", varName)
+	loop.WriteString("\t\t}\n")
+	loop.WriteString("\t}\n")
 
-	src = strings.Replace(src, targetBlock, chain.String(), 1)
-	return src
+	return strings.Replace(src, targetBlock, loop.String(), 1)
 }
 
 var (

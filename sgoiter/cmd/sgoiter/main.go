@@ -27,6 +27,8 @@ func main() {
 	rootsOnly := fs.Bool("roots-only", false, "n'émettre que les racines et leur clôture d'appels (défaut : les fonctions non-static)")
 	roots := fs.String("roots", "", "racines explicites, séparées par des virgules (implique -roots-only)")
 	exclude := fs.String("exclude", "", "symboles ou structures à exclure de l'émission, séparés par des virgules")
+	stripDeadGlobals := fs.Bool("strip-dead-globals", false, "supprimer les globales jamais référencées dans le fichier émis (fixpoint) — opt-in : une strate hand_*.go hors émission peut en consommer")
+	keepGlobals := fs.String("keep-globals", "", "globales à protéger de -strip-dead-globals, séparées par des virgules")
 	_ = fs.Parse(os.Args[1:])
 
 	if *in == "" || (*out == "" && *splitDir == "") {
@@ -138,11 +140,22 @@ func main() {
 		}
 	}
 
+	var keepList []string
+	if *keepGlobals != "" {
+		for _, s := range strings.Split(*keepGlobals, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				keepList = append(keepList, s)
+			}
+		}
+	}
+
 	src, err := emit.EmitOpts(m, emit.Options{
-		Profile:        emit.ProfileGo127,
-		Mode:           emMode,
-		PreferIR:       *preferIR,
-		ExcludeSymbols: excludedList,
+		Profile:          emit.ProfileGo127,
+		Mode:             emMode,
+		PreferIR:         *preferIR,
+		ExcludeSymbols:   excludedList,
+		StripDeadGlobals: *stripDeadGlobals,
+		KeepGlobals:      keepList,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

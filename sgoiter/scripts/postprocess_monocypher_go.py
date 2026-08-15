@@ -30,10 +30,10 @@ def postprocess(t: str) -> str:
         nums = [x.strip() for x in body.split(",") if x.strip()]
         while len(nums) < 10:
             nums.append("0")
-        return f"var {name} = []int{{{', '.join(nums[:10])}}}"
+        return f"var {name} = []int32{{{', '.join(nums[:10])}}}"
 
     t = re.sub(
-        r"var (fe_one|sqrtm1|d|D2|lop_x|lop_y|ufactor|A2|A) = \[\]int\{([^}]*)\}",
+        r"var (fe_one|sqrtm1|d|D2|lop_x|lop_y|ufactor|A2|A) = \[](?:int|int32)\{([^}]*)\}",
         pad_fe,
         t,
     )

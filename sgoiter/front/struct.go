@@ -23,8 +23,12 @@ func harvestTypedefs(src string) map[string]TypedefInfo {
 		tname := match[1]
 		alias := match[2]
 		alen, _ := strconv.Atoi(match[3])
+		baseTyp := mapType(tname)
+		if tname == "i32" || tname == "int32_t" {
+			baseTyp = ir.TypInt32
+		}
 		m[alias] = TypedefInfo{
-			BaseType: mapType(tname),
+			BaseType: baseTyp,
 			IsArray:  true,
 			ArrayLen: alen,
 		}
@@ -227,7 +231,7 @@ func harvestGlobalsExtra(src string, base []ir.Global) []ir.Global {
 			parts = append(parts, "0")
 		}
 		csv = strings.Join(parts, ", ")
-		out = append(out, ir.Global{Name: name, Type: ir.TypInt, InitCSV: csv})
+		out = append(out, ir.Global{Name: name, Type: ir.TypInt32, InitCSV: csv})
 		have[name] = true
 	}
 	return out

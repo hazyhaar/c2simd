@@ -5,11 +5,17 @@ package c2simd
 import (
 	"encoding/binary"
 	"simd/archsimd"
-	"unsafe"
 )
 
-// EncryptChaCha20_SIMD256 chiffre un tampon de données en utilisant le noyau SIMD 256-bit AVX2 (archsimd.Uint32x8)
-// sur 4 blocs parallèles (256 octets par itération) avec masquage XOR 64-bit conforme à l'entrelacement YMM (0 allocation heap).
+var chachaCtrInc4 = archsimd.LoadUint32x8Array(&[8]uint32{4, 0, 0, 0, 4, 0, 0, 0})
+var chachaCtrInc2 = archsimd.LoadUint32x8Array(&[8]uint32{2, 0, 0, 0, 2, 0, 0, 0})
+
+// EncryptChaCha20_SIMD256 chiffre un tampon en noyau SIMD 256-bit AVX2, 4 blocs
+// par itération. Étage de sortie réécrit le 2026-08-15 sur le modèle du kernel
+// monocypher55 (2 927 MB/s) : XOR directement depuis les registres
+// (GetLo/GetHi → LoadUint8x16.Xor.Store), plus aucun StoreArray ni
+// recomposition scalaire dans la boucle chaude ; compteur IETF 32-bit avancé
+// par Add de constante en lane (pas de rechargement d'état par itération).
 func EncryptChaCha20_SIMD256(key []byte, nonce []byte, counter uint32, src []byte, dst []byte) {
 	if len(src) == 0 {
 		return
@@ -40,16 +46,19 @@ func EncryptChaCha20_SIMD256(key []byte, nonce []byte, counter uint32, src []byt
 	offset := 0
 	currCtr := counter
 
-	// 1. Traitement des blocs de 256 octets via SIMD256 AVX2 (4 blocs par itération)
+	st3_A := archsimd.LoadUint32x8Array(&[8]uint32{
+		currCtr, n0, n1, n2,
+		currCtr + 1, n0, n1, n2,
+	})
+	st3_B := archsimd.LoadUint32x8Array(&[8]uint32{
+		currCtr + 2, n0, n1, n2,
+		currCtr + 3, n0, n1, n2,
+	})
+
+	// 1. Blocs de 256 octets (4 blocs/itération, pipeline A/B)
 	for offset+256 <= len(src) {
-		st3_A := archsimd.LoadUint32x8Array(&[8]uint32{
-			currCtr, n0, n1, n2,
-			currCtr + 1, n0, n1, n2,
-		})
-		st3_B := archsimd.LoadUint32x8Array(&[8]uint32{
-			currCtr + 2, n0, n1, n2,
-			currCtr + 3, n0, n1, n2,
-		})
+		_ = src[offset+255]
+		_ = dst[offset+255]
 
 		v0_A, v1_A, v2_A, v3_A := st0, st1, st2, st3_A
 		v0_B, v1_B, v2_B, v3_B := st0, st1, st2, st3_B
@@ -69,175 +78,94 @@ func EncryptChaCha20_SIMD256(key []byte, nonce []byte, counter uint32, src []byt
 		v2_B = v2_B.Add(st2)
 		v3_B = v3_B.Add(st3_B)
 
-		var buf0_A, buf1_A, buf2_A, buf3_A [8]uint32
-		var buf0_B, buf1_B, buf2_B, buf3_B [8]uint32
-		v0_A.StoreArray(&buf0_A)
-		v1_A.StoreArray(&buf1_A)
-		v2_A.StoreArray(&buf2_A)
-		v3_A.StoreArray(&buf3_A)
+		o := offset
+		k0_0, k0_1, k0_2, k0_3 := v0_A.GetLo().AsUint8x16(), v1_A.GetLo().AsUint8x16(), v2_A.GetLo().AsUint8x16(), v3_A.GetLo().AsUint8x16()
+		archsimd.LoadUint8x16(src[o : o+16]).Xor(k0_0).Store(dst[o : o+16])
+		archsimd.LoadUint8x16(src[o+16 : o+32]).Xor(k0_1).Store(dst[o+16 : o+32])
+		archsimd.LoadUint8x16(src[o+32 : o+48]).Xor(k0_2).Store(dst[o+32 : o+48])
+		archsimd.LoadUint8x16(src[o+48 : o+64]).Xor(k0_3).Store(dst[o+48 : o+64])
 
-		v0_B.StoreArray(&buf0_B)
-		v1_B.StoreArray(&buf1_B)
-		v2_B.StoreArray(&buf2_B)
-		v3_B.StoreArray(&buf3_B)
+		k1_0, k1_1, k1_2, k1_3 := v0_A.GetHi().AsUint8x16(), v1_A.GetHi().AsUint8x16(), v2_A.GetHi().AsUint8x16(), v3_A.GetHi().AsUint8x16()
+		archsimd.LoadUint8x16(src[o+64 : o+80]).Xor(k1_0).Store(dst[o+64 : o+80])
+		archsimd.LoadUint8x16(src[o+80 : o+96]).Xor(k1_1).Store(dst[o+80 : o+96])
+		archsimd.LoadUint8x16(src[o+96 : o+112]).Xor(k1_2).Store(dst[o+96 : o+112])
+		archsimd.LoadUint8x16(src[o+112 : o+128]).Xor(k1_3).Store(dst[o+112 : o+128])
 
-		// Écriture 64-bit vectorisée pour les 4 blocs (256 octets)
-		for b := 0; b < 2; b++ {
-			bOff := offset + b*64
-			base := b * 4
+		k2_0, k2_1, k2_2, k2_3 := v0_B.GetLo().AsUint8x16(), v1_B.GetLo().AsUint8x16(), v2_B.GetLo().AsUint8x16(), v3_B.GetLo().AsUint8x16()
+		archsimd.LoadUint8x16(src[o+128 : o+144]).Xor(k2_0).Store(dst[o+128 : o+144])
+		archsimd.LoadUint8x16(src[o+144 : o+160]).Xor(k2_1).Store(dst[o+144 : o+160])
+		archsimd.LoadUint8x16(src[o+160 : o+176]).Xor(k2_2).Store(dst[o+160 : o+176])
+		archsimd.LoadUint8x16(src[o+176 : o+192]).Xor(k2_3).Store(dst[o+176 : o+192])
 
-			sPtr := (*[8]uint64)(unsafe.Pointer(&src[bOff]))
-			dPtr := (*[8]uint64)(unsafe.Pointer(&dst[bOff]))
-
-			u64_0 := uint64(buf0_A[base+0]) | (uint64(buf0_A[base+1]) << 32)
-			u64_1 := uint64(buf0_A[base+2]) | (uint64(buf0_A[base+3]) << 32)
-			u64_2 := uint64(buf1_A[base+0]) | (uint64(buf1_A[base+1]) << 32)
-			u64_3 := uint64(buf1_A[base+2]) | (uint64(buf1_A[base+3]) << 32)
-			u64_4 := uint64(buf2_A[base+0]) | (uint64(buf2_A[base+1]) << 32)
-			u64_5 := uint64(buf2_A[base+2]) | (uint64(buf2_A[base+3]) << 32)
-			u64_6 := uint64(buf3_A[base+0]) | (uint64(buf3_A[base+1]) << 32)
-			u64_7 := uint64(buf3_A[base+2]) | (uint64(buf3_A[base+3]) << 32)
-
-			dPtr[0] = sPtr[0] ^ u64_0
-			dPtr[1] = sPtr[1] ^ u64_1
-			dPtr[2] = sPtr[2] ^ u64_2
-			dPtr[3] = sPtr[3] ^ u64_3
-			dPtr[4] = sPtr[4] ^ u64_4
-			dPtr[5] = sPtr[5] ^ u64_5
-			dPtr[6] = sPtr[6] ^ u64_6
-			dPtr[7] = sPtr[7] ^ u64_7
-		}
-
-		for b := 0; b < 2; b++ {
-			bOff := offset + 128 + b*64
-			base := b * 4
-
-			sPtr := (*[8]uint64)(unsafe.Pointer(&src[bOff]))
-			dPtr := (*[8]uint64)(unsafe.Pointer(&dst[bOff]))
-
-			u64_0 := uint64(buf0_B[base+0]) | (uint64(buf0_B[base+1]) << 32)
-			u64_1 := uint64(buf0_B[base+2]) | (uint64(buf0_B[base+3]) << 32)
-			u64_2 := uint64(buf1_B[base+0]) | (uint64(buf1_B[base+1]) << 32)
-			u64_3 := uint64(buf1_B[base+2]) | (uint64(buf1_B[base+3]) << 32)
-			u64_4 := uint64(buf2_B[base+0]) | (uint64(buf2_B[base+1]) << 32)
-			u64_5 := uint64(buf2_B[base+2]) | (uint64(buf2_B[base+3]) << 32)
-			u64_6 := uint64(buf3_B[base+0]) | (uint64(buf3_B[base+1]) << 32)
-			u64_7 := uint64(buf3_B[base+2]) | (uint64(buf3_B[base+3]) << 32)
-
-			dPtr[0] = sPtr[0] ^ u64_0
-			dPtr[1] = sPtr[1] ^ u64_1
-			dPtr[2] = sPtr[2] ^ u64_2
-			dPtr[3] = sPtr[3] ^ u64_3
-			dPtr[4] = sPtr[4] ^ u64_4
-			dPtr[5] = sPtr[5] ^ u64_5
-			dPtr[6] = sPtr[6] ^ u64_6
-			dPtr[7] = sPtr[7] ^ u64_7
-		}
+		k3_0, k3_1, k3_2, k3_3 := v0_B.GetHi().AsUint8x16(), v1_B.GetHi().AsUint8x16(), v2_B.GetHi().AsUint8x16(), v3_B.GetHi().AsUint8x16()
+		archsimd.LoadUint8x16(src[o+192 : o+208]).Xor(k3_0).Store(dst[o+192 : o+208])
+		archsimd.LoadUint8x16(src[o+208 : o+224]).Xor(k3_1).Store(dst[o+208 : o+224])
+		archsimd.LoadUint8x16(src[o+224 : o+240]).Xor(k3_2).Store(dst[o+224 : o+240])
+		archsimd.LoadUint8x16(src[o+240 : o+256]).Xor(k3_3).Store(dst[o+240 : o+256])
 
 		offset += 256
 		currCtr += 4
+		// Compteur IETF 32-bit en lane 0/4 : l'Add wrappe naturellement en
+		// arithmétique de lane, aucune recharge d'état nécessaire.
+		st3_A = st3_A.Add(chachaCtrInc4)
+		st3_B = st3_B.Add(chachaCtrInc4)
 	}
 
-	// 2. Traitement des blocs de 128 octets restants
+	// 2. Paire de blocs restante (128 octets)
 	for offset+128 <= len(src) {
-		st3 := archsimd.LoadUint32x8Array(&[8]uint32{
-			currCtr, n0, n1, n2,
-			currCtr + 1, n0, n1, n2,
-		})
+		_ = src[offset+127]
+		_ = dst[offset+127]
 
-		v0, v1, v2, v3 := st0, st1, st2, st3
+		v0, v1, v2, v3 := st0, st1, st2, st3_A
 		for i := 0; i < 10; i++ {
 			v0, v1, v2, v3 = ChaCha20DoubleBlockSIMD256(v0, v1, v2, v3)
 		}
-
 		v0 = v0.Add(st0)
 		v1 = v1.Add(st1)
 		v2 = v2.Add(st2)
-		v3 = v3.Add(st3)
+		v3 = v3.Add(st3_A)
 
-		var buf0, buf1, buf2, buf3 [8]uint32
-		v0.StoreArray(&buf0)
-		v1.StoreArray(&buf1)
-		v2.StoreArray(&buf2)
-		v3.StoreArray(&buf3)
+		o := offset
+		ka0, ka1, ka2, ka3 := v0.GetLo().AsUint8x16(), v1.GetLo().AsUint8x16(), v2.GetLo().AsUint8x16(), v3.GetLo().AsUint8x16()
+		archsimd.LoadUint8x16(src[o : o+16]).Xor(ka0).Store(dst[o : o+16])
+		archsimd.LoadUint8x16(src[o+16 : o+32]).Xor(ka1).Store(dst[o+16 : o+32])
+		archsimd.LoadUint8x16(src[o+32 : o+48]).Xor(ka2).Store(dst[o+32 : o+48])
+		archsimd.LoadUint8x16(src[o+48 : o+64]).Xor(ka3).Store(dst[o+48 : o+64])
 
-		for b := 0; b < 2; b++ {
-			bOff := offset + b*64
-			base := b * 4
-
-			sPtr := (*[8]uint64)(unsafe.Pointer(&src[bOff]))
-			dPtr := (*[8]uint64)(unsafe.Pointer(&dst[bOff]))
-
-			u64_0 := uint64(buf0[base+0]) | (uint64(buf0[base+1]) << 32)
-			u64_1 := uint64(buf0[base+2]) | (uint64(buf0[base+3]) << 32)
-			u64_2 := uint64(buf1[base+0]) | (uint64(buf1[base+1]) << 32)
-			u64_3 := uint64(buf1[base+2]) | (uint64(buf1[base+3]) << 32)
-			u64_4 := uint64(buf2[base+0]) | (uint64(buf2[base+1]) << 32)
-			u64_5 := uint64(buf2[base+2]) | (uint64(buf2[base+3]) << 32)
-			u64_6 := uint64(buf3[base+0]) | (uint64(buf3[base+1]) << 32)
-			u64_7 := uint64(buf3[base+2]) | (uint64(buf3[base+3]) << 32)
-
-			dPtr[0] = sPtr[0] ^ u64_0
-			dPtr[1] = sPtr[1] ^ u64_1
-			dPtr[2] = sPtr[2] ^ u64_2
-			dPtr[3] = sPtr[3] ^ u64_3
-			dPtr[4] = sPtr[4] ^ u64_4
-			dPtr[5] = sPtr[5] ^ u64_5
-			dPtr[6] = sPtr[6] ^ u64_6
-			dPtr[7] = sPtr[7] ^ u64_7
-		}
+		kb0, kb1, kb2, kb3 := v0.GetHi().AsUint8x16(), v1.GetHi().AsUint8x16(), v2.GetHi().AsUint8x16(), v3.GetHi().AsUint8x16()
+		archsimd.LoadUint8x16(src[o+64 : o+80]).Xor(kb0).Store(dst[o+64 : o+80])
+		archsimd.LoadUint8x16(src[o+80 : o+96]).Xor(kb1).Store(dst[o+80 : o+96])
+		archsimd.LoadUint8x16(src[o+96 : o+112]).Xor(kb2).Store(dst[o+96 : o+112])
+		archsimd.LoadUint8x16(src[o+112 : o+128]).Xor(kb3).Store(dst[o+112 : o+128])
 
 		offset += 128
 		currCtr += 2
+		st3_A = st3_A.Add(chachaCtrInc2)
+		st3_B = st3_B.Add(chachaCtrInc2)
 	}
 
-	// 3. Traitement du reliquat (tail < 128 octets) sans allocation heap (tampon en pile)
+	// 3. Reliquat (< 128 octets) : keystream de la paire courante en pile
 	if offset < len(src) {
 		rem := len(src) - offset
-		st3 := archsimd.LoadUint32x8Array(&[8]uint32{
-			currCtr, n0, n1, n2,
-			currCtr + 1, n0, n1, n2,
-		})
 
-		v0, v1, v2, v3 := st0, st1, st2, st3
+		v0, v1, v2, v3 := st0, st1, st2, st3_A
 		for i := 0; i < 10; i++ {
 			v0, v1, v2, v3 = ChaCha20DoubleBlockSIMD256(v0, v1, v2, v3)
 		}
 		v0 = v0.Add(st0)
 		v1 = v1.Add(st1)
 		v2 = v2.Add(st2)
-		v3 = v3.Add(st3)
-
-		var buf0, buf1, buf2, buf3 [8]uint32
-		v0.StoreArray(&buf0)
-		v1.StoreArray(&buf1)
-		v2.StoreArray(&buf2)
-		v3.StoreArray(&buf3)
+		v3 = v3.Add(st3_A)
 
 		var ks [128]byte
-		for b := 0; b < 2; b++ {
-			bOff := b * 64
-			base := b * 4
-			binary.LittleEndian.PutUint32(ks[bOff+0:], buf0[base+0])
-			binary.LittleEndian.PutUint32(ks[bOff+4:], buf0[base+1])
-			binary.LittleEndian.PutUint32(ks[bOff+8:], buf0[base+2])
-			binary.LittleEndian.PutUint32(ks[bOff+12:], buf0[base+3])
-
-			binary.LittleEndian.PutUint32(ks[bOff+16:], buf1[base+0])
-			binary.LittleEndian.PutUint32(ks[bOff+20:], buf1[base+1])
-			binary.LittleEndian.PutUint32(ks[bOff+24:], buf1[base+2])
-			binary.LittleEndian.PutUint32(ks[bOff+28:], buf1[base+3])
-
-			binary.LittleEndian.PutUint32(ks[bOff+32:], buf2[base+0])
-			binary.LittleEndian.PutUint32(ks[bOff+36:], buf2[base+1])
-			binary.LittleEndian.PutUint32(ks[bOff+40:], buf2[base+2])
-			binary.LittleEndian.PutUint32(ks[bOff+44:], buf2[base+3])
-
-			binary.LittleEndian.PutUint32(ks[bOff+48:], buf3[base+0])
-			binary.LittleEndian.PutUint32(ks[bOff+52:], buf3[base+1])
-			binary.LittleEndian.PutUint32(ks[bOff+56:], buf3[base+2])
-			binary.LittleEndian.PutUint32(ks[bOff+60:], buf3[base+3])
-		}
+		v0.GetLo().AsUint8x16().Store(ks[0:16])
+		v1.GetLo().AsUint8x16().Store(ks[16:32])
+		v2.GetLo().AsUint8x16().Store(ks[32:48])
+		v3.GetLo().AsUint8x16().Store(ks[48:64])
+		v0.GetHi().AsUint8x16().Store(ks[64:80])
+		v1.GetHi().AsUint8x16().Store(ks[80:96])
+		v2.GetHi().AsUint8x16().Store(ks[96:112])
+		v3.GetHi().AsUint8x16().Store(ks[112:128])
 
 		for i := 0; i < rem; i++ {
 			dst[offset+i] = src[offset+i] ^ ks[i]

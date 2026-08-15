@@ -25,3 +25,4 @@ spec/dogfood/testdata/cycles/202608*/
 sgoiter/spec/bench/probe_smoke/
 sgoiter/spec/bench/probe_*/stderr.txt
 sgoiter/spec/bench/probe_*/PROBE_console.md
+audits/

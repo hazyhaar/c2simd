@@ -89,31 +89,36 @@ func TestArchStripIndexIntCasts(t *testing.T) {
 	}
 }
 
-func TestArchBuiltinMinMax(t *testing.T) {
-	in := `v10 = func() uint64 { if (func() int { if v1 < v2 { return 1 }; return 0 }()) != 0 { return v1 }; return v2 }()`
-	want := `v10 = min(v1, v2)`
-	got := archBuiltinMinMax(in)
-	if got != want {
-		t.Errorf("archBuiltinMinMax = %q; want %q", got, want)
+func TestAstBuiltinMinMax(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"nested", `v10 = func() uint64 { if (func() int { if v1 < v2 { return 1 }; return 0 }()) != 0 { return v1 }; return v2 }()`, `v10 = min(v1, v2)`},
+		{"simple", `v10 = func() uint64 { if v1 < v2 { return v1 }; return v2 }()`, `v10 = min(v1, v2)`},
+		{"le", `v10 = func() uint64 { if v1 <= v2 { return v1 }; return v2 }()`, `v10 = min(v1, v2)`},
+		{"ge", `v10 = func() uint64 { if v1 >= v2 { return v1 }; return v2 }()`, `v10 = max(v1, v2)`},
+		{"casts_appariés", `v10 = func() uint64 { if uint64(a) < uint64(b) { return uint64(a) }; return uint64(b) }()`, `v10 = min(uint64(a), uint64(b))`},
+		{"cast_litteral", `v10 = func() uint32 { if digest_size <= 64 { return digest_size }; return uint32(64) }()`, `v10 = min(digest_size, uint32(64))`},
+		{"cast_litteral_nested", `v10 = func() uint64 { if (func() int { if ctx.Hash_size < 64 { return 1 }; return 0 }()) != 0 { return ctx.Hash_size }; return uint64(64) }()`, `v10 = min(ctx.Hash_size, uint64(64))`},
 	}
-
-	inSimple := `v10 = func() uint64 { if v1 < v2 { return v1 }; return v2 }()`
-	wantSimple := `v10 = min(v1, v2)`
-	gotSimple := archBuiltinMinMax(inSimple)
-	if gotSimple != wantSimple {
-		t.Errorf("archBuiltinMinMax simple = %q; want %q", gotSimple, wantSimple)
+	for _, tc := range cases {
+		if got := astBuiltinMinMax(tc.in); got != tc.want {
+			t.Errorf("%s : astBuiltinMinMax(%q) = %q; want %q", tc.name, tc.in, got, tc.want)
+		}
 	}
+}
 
-	inLE := `v10 = func() uint64 { if v1 <= v2 { return v1 }; return v2 }()`
-	wantLE := `v10 = min(v1, v2)`
-	if gotLE := archBuiltinMinMax(inLE); gotLE != wantLE {
-		t.Errorf("archBuiltinMinMax <= = %q; want %q", gotLE, wantLE)
+// Non-régression du défaut démontré par oracle (audit 2026-08-15) : une
+// comparaison TRONQUÉE par cast avec retours pleine largeur ne doit JAMAIS
+// devenir min/max — la variante regex le faisait (divergence a=1, b=2^32).
+func TestAstBuiltinMinMaxRefusesCastMismatch(t *testing.T) {
+	cases := []string{
+		`v1 = func() uint64 { if int32(a) < int32(b) { return a }; return b }()`,
+		`v1 = func() uint64 { if int32(a) < b { return a }; return b }()`,
+		`v1 = func() uint64 { if a < b { return uint32(a) }; return b }()`,
 	}
-
-	inGE := `v10 = func() uint64 { if v1 >= v2 { return v1 }; return v2 }()`
-	wantGE := `v10 = max(v1, v2)`
-	if gotGE := archBuiltinMinMax(inGE); gotGE != wantGE {
-		t.Errorf("archBuiltinMinMax >= = %q; want %q", gotGE, wantGE)
+	for _, in := range cases {
+		if got := astBuiltinMinMax(in); got != in {
+			t.Errorf("réécriture interdite : %q -> %q", in, got)
+		}
 	}
 }
 
@@ -162,21 +167,78 @@ func TestArchFoldRotateLeftConstants(t *testing.T) {
 	}
 }
 
-func TestArchSimplifyDoubleNegations(t *testing.T) {
-	in := "\tif !(v17 != 0) { return 0 }\n\tif !(flag == 0) { break }"
-	want := "\tif v17 == 0 { return 0 }\n\tif flag != 0 { break }"
-	got := archSimplifyDoubleNegations(in)
-	if got != want {
-		t.Errorf("archSimplifyDoubleNegations = %q; want %q", got, want)
+func TestAstSimplifyNegatedComparisons(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"ident", "\tif !(v17 != 0) {\n\t\tv1 = 0\n\t}", "\tif v17 == 0 {\n\t\tv1 = 0\n\t}"},
+		{"eq", "\tif !(flag == 0) {\n\t\tv1 = 0\n\t}", "\tif flag != 0 {\n\t\tv1 = 0\n\t}"},
+		// La forme sur APPEL que la regex laissait passer (ge.go:33 du vivant).
+		{"appel", "\tif !(Invsqrt(h.X[:], h.X[:]) != 0) {\n\t\tv1 = 0\n\t}", "\tif Invsqrt(h.X[:], h.X[:]) == 0 {\n\t\tv1 = 0\n\t}"},
+		{"pas_zero", "\tif !(v != 1) {\n\t\tv1 = 0\n\t}", "\tif !(v != 1) {\n\t\tv1 = 0\n\t}"},
+	}
+	for _, tc := range cases {
+		if got := astSimplifyNegatedComparisons(tc.in); got != tc.want {
+			t.Errorf("%s : %q -> %q ; want %q", tc.name, tc.in, got, tc.want)
+		}
 	}
 }
 
-func TestArchFoldGapLiteralConstants(t *testing.T) {
+func TestAstStripAssignLiteralCasts(t *testing.T) {
+	in := "\th[0] = int32(1)\n\tv := int32(1)\n\tx = uint8(0xff)"
+	want := "\th[0] = 1\n\tv := int32(1)\n\tx = 0xff"
+	if got := astStripAssignLiteralCasts(in); got != want {
+		t.Errorf("strip assign casts = %q; want %q", got, want)
+	}
+}
+
+func TestAstStripDeadTypes(t *testing.T) {
+	in := `package p
+
+type S25 struct {
+	X int64
+}
+
+type Ge struct {
+	X [10]int32
+}
+
+var g Ge
+
+func F() { _ = g }
+`
+	got := astStripDeadGlobals(in)
+	if strings.Contains(got, "S25") {
+		t.Errorf("type mort survivant : %q", got)
+	}
+	if !strings.Contains(got, "type Ge") {
+		t.Errorf("type vivant supprimé : %q", got)
+	}
+}
+
+func TestAstFoldGapLiteralConstants(t *testing.T) {
 	in := "\tgap := Gap(ad_size, uint64(16))\n\tgap2 := Gap(text_size, 16)"
 	want := "\tgap := (-ad_size) & 15\n\tgap2 := (-text_size) & 15"
-	got := archFoldGapLiteralConstants(in)
+	got := astFoldGapLiteralConstants(in)
 	if got != want {
-		t.Errorf("archFoldGapLiteralConstants = %q; want %q", got, want)
+		t.Errorf("astFoldGapLiteralConstants = %q; want %q", got, want)
+	}
+}
+
+// Non-régression du défaut latent démontré (audit 2026-08-15) : un argument
+// composé doit être parenthésé sous la négation ((-(a + b)) & 15, jamais
+// (-a + b) & 15), et le remplacement entier est parenthésé quand le contexte
+// parent lie plus fort que &.
+func TestAstFoldGapLiteralConstantsPrecedence(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"somme", "\tgap := Gap(a + b, 16)", "\tgap := (-(a + b)) & 15"},
+		{"comparaison", "\tif Gap(x, 16) > 0 {\n\t\tx++\n\t}", "\tif (-x) & 15 > 0 {\n\t\tx++\n\t}"},
+		{"produit", "\tv := 2 * Gap(x, 16)", "\tv := 2 * ((-x) & 15)"},
+		{"argument", "\tf(Gap(x, 16))", "\tf((-x) & 15)"},
+		{"pas_16", "\tgap := Gap(x, 32)", "\tgap := Gap(x, 32)"},
+	}
+	for _, tc := range cases {
+		if got := astFoldGapLiteralConstants(tc.in); got != tc.want {
+			t.Errorf("%s : astFoldGapLiteralConstants(%q) = %q; want %q", tc.name, tc.in, got, tc.want)
+		}
 	}
 }
 
@@ -191,14 +253,26 @@ func TestArchUnrollBlake2bSigma(t *testing.T) {
 	}
 }
 
-func TestArchUnrollX25519InverseChain(t *testing.T) {
+func TestArchEmitX25519InverseLm2Loop(t *testing.T) {
 	in := "\tv28 = 252\n\tfor v28 >= 0 {\n\t\tMultiply(v27, v6, v6)\n\t}\n\tv50 = 0"
-	got := archUnrollX25519InverseChain(in)
+	got := archEmitX25519InverseLm2Loop(in)
 	if strings.Contains(got, "v28 = 252") || strings.Contains(got, "for v28 >= 0") {
-		t.Errorf("archUnrollX25519InverseChain still contains dynamic loop: %s", got)
+		t.Errorf("ancienne boucle SSA survivante : %s", got)
 	}
-	if !strings.Contains(got, "Chaîne d'addition ARCHTIME constant-time pour L-2") {
-		t.Errorf("archUnrollX25519InverseChain does not contain addition chain: %s", got)
+	if strings.Count(got, "Multiply(") > 4 {
+		t.Errorf("déroulage straight-line encore présent : %s", got)
+	}
+	if !strings.Contains(got, "var lm2Bytes = [32]byte{") {
+		t.Errorf("table lm2Bytes absente du texte émis : %s", got)
+	}
+	if !strings.Contains(got, "for bit := 252; bit >= 0; bit--") {
+		t.Errorf("boucle compacte absente : %s", got)
+	}
+	if !strings.Contains(got, "le if est admissible") {
+		t.Errorf("commentaire de bit public absent : %s", got)
+	}
+	if !strings.Contains(got, "0xeb, 0xd3, 0xf5, 0x5c") {
+		t.Errorf("octets L-2 absents : %s", got)
 	}
 }
 

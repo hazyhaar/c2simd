@@ -14,8 +14,8 @@ echo "== monocypher55 package tests =="
 echo "== secretstream55 make ci =="
 (cd ../pkg/secretstream55 && make ci)
 
-echo "== aead_sgoiter tag =="
-(cd ../pkg/secretstream55 && go test -count=1 -tags aead_sgoiter ./...)
+echo "== aead_c2simd tag (ancien défaut) =="
+(cd ../pkg/secretstream55 && go test -count=1 -tags aead_c2simd ./...)
 
 echo "== regen dogfood =="
 ./sgoiter/scripts/regen_monocypher_dogfood.sh

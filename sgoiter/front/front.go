@@ -1547,13 +1547,13 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 					continue
 				}
 				r := f.Alloc()
-				regs[nm] = regInfo{v: r, typ: ir.TypInt, ptr: true, scale: 1, elemIndex: true, localArr: 10}
-				notePtr(r, ir.TypInt, 1, ir.NoVal)
+				regs[nm] = regInfo{v: r, typ: ir.TypInt32, ptr: true, scale: 1, elemIndex: true, localArr: 10}
+				notePtr(r, ir.TypInt32, 1, ir.NoVal)
 				pm := ptrMeta[r]
 				pm.elemIndex = true
 				pm.localArr = 10
 				ptrMeta[r] = pm
-				instrs = append(instrs, ir.Instr{Op: ir.OpAlloca, Dst: r, Imm: 10, Elem: ir.TypInt})
+				instrs = append(instrs, ir.Instr{Op: ir.OpAlloca, Dst: r, Imm: 10, Elem: ir.TypInt32})
 			}
 			return instrs, nil
 		}
@@ -3317,7 +3317,13 @@ func tryArrayInitDecl(f *ir.Func, regs map[string]regInfo, rest string) (int, []
 
 	// Hoist multi-dim / large const tables as module globals (blake2b sigma).
 	// Also hoist ALL function-static const with non-zero init (Barrett r[9] is small but must keep values).
-	hoist := len(dims) >= 2 || (total >= 32 && looksLikeConstInit(initBody)) ||
+	// JAMAIS un local mutable zéro-initialisé : en C il est re-zéroté à CHAQUE
+	// entrée ; promu en globale, il garde les résidus de l'appel précédent
+	// (bug de condensat keyed Blake2b démontré par oracle le 2026-08-15 :
+	// uint8_t key_block[128] = {0} hoisté → clé courte polluée par la clé
+	// longue antérieure) — en plus de la non-réentrance.
+	hoist := len(dims) >= 2 ||
+		(total >= 32 && looksLikeConstInit(initBody) && !isZeroInit(initBody)) ||
 		(wasStaticConst && !isZeroInit(initBody) && looksLikeConstInit(initBody))
 	if hoist {
 		gname := f.Name + "_" + name
