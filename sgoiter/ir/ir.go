@@ -47,12 +47,15 @@ const (
 	TypInt    TypeName = "int"
 	TypInt8   TypeName = "int8"
 	TypInt16  TypeName = "int16"
+	TypInt32  TypeName = "int32"
 	TypInt64  TypeName = "int64"
-	TypUint8  TypeName = "uint8"
-	TypUint32 TypeName = "uint32"
-	TypUint64 TypeName = "uint64"
-	TypBool   TypeName = "bool"
-	TypVoid   TypeName = "void"
+	TypUint8   TypeName = "uint8"
+	TypUint32  TypeName = "uint32"
+	TypUint64  TypeName = "uint64"
+	TypFloat32 TypeName = "float32"
+	TypFloat64 TypeName = "float64"
+	TypBool    TypeName = "bool"
+	TypVoid    TypeName = "void"
 )
 
 // Value is a virtual register index, or -1 for none.

@@ -3,6 +3,7 @@ package emit
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -126,54 +127,53 @@ func archStripIndexIntCasts(src string) string {
 }
 
 var (
-	// IIFE min ternaire C:
-	// func() T { if (func() int { if a < b { return 1 }; return 0 }()) != 0 { return a }; return b }()
-	reMinIIFENested = regexp.MustCompile(`func\(\)\s*(\w+)\s*\{\s*if\s*\(func\(\)\s*int\s*\{\s*if\s*([^<]+)<\s*([^{]+)\{\s*return 1\s*\};\s*return 0\s*\}\(\)\)\s*!=\s*0\s*\{\s*return\s+([^;]+)\s*\};\s*return\s+([^;]+)\s*\}\(\)`)
-	// func() T { if a < b { return a }; return b }()
-	reMinIIFESimple = regexp.MustCompile(`func\(\)\s*(\w+)\s*\{\s*if\s*([^<]+)<\s*([^{]+)\{\s*return\s+([^;]+)\s*\};\s*return\s+([^;]+)\s*\}\(\)`)
-	// func() T { if a > b { return a }; return b }()
-	reMaxIIFESimple = regexp.MustCompile(`func\(\)\s*(\w+)\s*\{\s*if\s*([^>]+)>\s*([^{]+)\{\s*return\s+([^;]+)\s*\};\s*return\s+([^;]+)\s*\}\(\)`)
+	// Nested IIFE min/max:
+	// func() T { if (func() int { if a OP b { return 1 }; return 0 }()) != 0 { return ret1 }; return ret2 }()
+	reMinMaxIIFENested = regexp.MustCompile(`(?s)func\(\)\s*(\w+)\s*\{\s*if\s*\(func\(\)\s*int\s*\{\s*if\s*(.*?)\s*(<=|<|>=|>)\s*([^{]+?)\s*\{\s*return\s+1\s*\};\s*return\s+0\s*\}\(\)\)\s*!=\s*0\s*\{\s*return\s+([^;]+?)\s*\};\s*return\s+([^;]+?)\s*\}\(\)`)
+	// Simple IIFE min/max:
+	// func() T { if a OP b { return ret1 }; return ret2 }()
+	reMinMaxIIFESimple = regexp.MustCompile(`(?s)func\(\)\s*(\w+)\s*\{\s*if\s*(.*?)\s*(<=|<|>=|>)\s*([^{]+?)\s*\{\s*return\s+([^;]+?)\s*\};\s*return\s+([^;]+?)\s*\}\(\)`)
 )
 
-// archBuiltinMinMax transforme les IIFE ternaires de min/max en appels aux fonctions intégrées min(a, b) et max(a, b).
+// archBuiltinMinMax transforme les IIFE ternaires de min/max (<, <=, >, >=) en appels aux fonctions intégrées min(a, b) et max(a, b).
 func archBuiltinMinMax(src string) string {
-	// Nested IIFE min
-	src = reMinIIFENested.ReplaceAllStringFunc(src, func(m string) string {
-		parts := reMinIIFENested.FindStringSubmatch(m)
-		if len(parts) >= 6 {
-			a, b := strings.TrimSpace(parts[2]), strings.TrimSpace(parts[3])
-			retA, retB := strings.TrimSpace(parts[4]), strings.TrimSpace(parts[5])
-			if a == retA && b == retB {
-				return "min(" + a + ", " + b + ")"
+	reCast := regexp.MustCompile(`^(?:uint64|uint32|uint16|uint8|int64|int32|int16|int8|int|uintptr)\((.+)\)$`)
+	clean := func(s string) string {
+		s = strings.ReplaceAll(strings.TrimSpace(s), " ", "")
+		return reCast.ReplaceAllString(s, "$1")
+	}
+
+	process := func(m string, parts []string) string {
+		if len(parts) >= 7 {
+			a, op, b := strings.TrimSpace(parts[2]), strings.TrimSpace(parts[3]), strings.TrimSpace(parts[4])
+			ret1, ret2 := strings.TrimSpace(parts[5]), strings.TrimSpace(parts[6])
+			ca, cb, cr1, cr2 := clean(a), clean(b), clean(ret1), clean(ret2)
+			switch op {
+			case "<", "<=":
+				if ca == cr1 && cb == cr2 {
+					return "min(" + ret1 + ", " + ret2 + ")"
+				}
+				if ca == cr2 && cb == cr1 {
+					return "max(" + ret2 + ", " + ret1 + ")"
+				}
+			case ">", ">=":
+				if ca == cr1 && cb == cr2 {
+					return "max(" + ret1 + ", " + ret2 + ")"
+				}
+				if ca == cr2 && cb == cr1 {
+					return "min(" + ret2 + ", " + ret1 + ")"
+				}
 			}
 		}
 		return m
+	}
+
+	src = reMinMaxIIFENested.ReplaceAllStringFunc(src, func(m string) string {
+		return process(m, reMinMaxIIFENested.FindStringSubmatch(m))
 	})
 
-	// Simple IIFE min
-	src = reMinIIFESimple.ReplaceAllStringFunc(src, func(m string) string {
-		parts := reMinIIFESimple.FindStringSubmatch(m)
-		if len(parts) >= 6 {
-			a, b := strings.TrimSpace(parts[2]), strings.TrimSpace(parts[3])
-			retA, retB := strings.TrimSpace(parts[4]), strings.TrimSpace(parts[5])
-			if a == retA && b == retB {
-				return "min(" + a + ", " + b + ")"
-			}
-		}
-		return m
-	})
-
-	// Simple IIFE max
-	src = reMaxIIFESimple.ReplaceAllStringFunc(src, func(m string) string {
-		parts := reMaxIIFESimple.FindStringSubmatch(m)
-		if len(parts) >= 6 {
-			a, b := strings.TrimSpace(parts[2]), strings.TrimSpace(parts[3])
-			retA, retB := strings.TrimSpace(parts[4]), strings.TrimSpace(parts[5])
-			if a == retA && b == retB {
-				return "max(" + a + ", " + b + ")"
-			}
-		}
-		return m
+	src = reMinMaxIIFESimple.ReplaceAllStringFunc(src, func(m string) string {
+		return process(m, reMinMaxIIFESimple.FindStringSubmatch(m))
 	})
 
 	return src
@@ -345,11 +345,18 @@ func archFoldPingPongCasts(src string) string {
 	return src
 }
 
-var reLitCastComp = regexp.MustCompile(`(==|!=)\s*(?:uint64|uint32|uint8|int64|int32|int)\((\d+)\)`)
+var (
+	reLitCastCompRight = regexp.MustCompile(`(==|!=|<|>|<=|>=)\s*(?:uint64|uint32|uint16|uint8|int64|int32|int16|int8|int|uintptr)\((0x[0-9a-fA-F]+|\d+)\)`)
+	reLitCastCompLeft  = regexp.MustCompile(`(?:uint64|uint32|uint16|uint8|int64|int32|int16|int8|int|uintptr)\((0x[0-9a-fA-F]+|\d+)\)\s*(==|!=|<|>|<=|>=)`)
+	reLitCastArith     = regexp.MustCompile(`([+\-*/&|^]=?)\s*(?:uint64|uint32|uint16|uint8|int64|int32|int16|int8|int|uintptr)\((0x[0-9a-fA-F]+|\d+)\)`)
+)
 
-// archStripRedundantLiteralCasts élimine les conversions explicites sur des constantes littérales en comparaison.
+// archStripRedundantLiteralCasts élimine les conversions explicites sur des constantes littérales en comparaison et arithmétique.
 func archStripRedundantLiteralCasts(src string) string {
-	return reLitCastComp.ReplaceAllString(src, `$1 $2`)
+	src = reLitCastCompRight.ReplaceAllString(src, `$1 $2`)
+	src = reLitCastCompLeft.ReplaceAllString(src, `$1 $2`)
+	src = reLitCastArith.ReplaceAllString(src, `$1 $2`)
+	return src
 }
 
 var (
@@ -502,28 +509,177 @@ func archUnrollX25519InverseChain(src string) string {
 	if idx == -1 {
 		return src
 	}
-	endPattern := "v50 = 0"
-	endRel := strings.Index(src[idx:], endPattern)
+	loopStart := strings.Index(src[idx:], "for v28 >= 0")
+	if loopStart == -1 {
+		return src
+	}
+	loopIdx := idx + loopStart
+	openBrace := strings.Index(src[loopIdx:], "{")
+	if openBrace == -1 {
+		return src
+	}
+	// Comptage de profondeur pour trouver l'accolade fermante exacte de la boucle for
+	depth := 0
+	endRel := -1
+	for pos := loopIdx + openBrace; pos < len(src); pos++ {
+		if src[pos] == '{' {
+			depth++
+		} else if src[pos] == '}' {
+			depth--
+			if depth == 0 {
+				endRel = pos + 1
+				break
+			}
+		}
+	}
 	if endRel == -1 {
 		return src
 	}
-	targetBlock := src[idx : idx+endRel]
+	targetBlock := src[idx:endRel]
+
+	varName := "m_inv"
+	if !strings.Contains(targetBlock, "m_inv") {
+		varName = "v6"
+	}
 
 	var chain strings.Builder
 	chain.WriteString("\t// Chaîne d'addition ARCHTIME constant-time pour L-2 (253 étapes sans branche)\n")
 	for bit := 252; bit >= 0; bit-- {
 		bVal := (lm2Bytes[bit/8] >> (bit % 8)) & 1
-		chain.WriteString("\tclear(v27)\n")
-		chain.WriteString("\tMultiply(v27, v6, v6)\n")
-		chain.WriteString("\tRedc(v6, v27)\n")
+		chain.WriteString("\tclear(v27[:])\n")
+		fmt.Fprintf(&chain, "\tMultiply(v27[:], %s[:], %s[:])\n", varName, varName)
+		fmt.Fprintf(&chain, "\tRedc(%s[:], v27[:])\n", varName)
 		if bVal == 1 {
-			chain.WriteString("\tclear(v27)\n")
-			chain.WriteString("\tMultiply(v27, v6, v9)\n")
-			chain.WriteString("\tRedc(v6, v27)\n")
+			chain.WriteString("\tclear(v27[:])\n")
+			fmt.Fprintf(&chain, "\tMultiply(v27[:], %s[:], v9[:])\n", varName)
+			fmt.Fprintf(&chain, "\tRedc(%s[:], v27[:])\n", varName)
 		}
 	}
 
 	src = strings.Replace(src, targetBlock, chain.String(), 1)
+	return src
+}
+
+var (
+	// Clear loop:
+	// vX = 0
+	// for vX < LIMIT {
+	//     TARGET[vX] = 0
+	//     vX++
+	// }
+	reClearLoop = regexp.MustCompile(`(?m)^([ \t]*)([a-zA-Z0-9_]+)\s*=\s*0\n[ \t]*for\s+([a-zA-Z0-9_]+)\s*<\s*([a-zA-Z0-9_\.]+|\([^\)]+\))\s*\{\n[ \t]*([a-zA-Z0-9_\.]+)\s*\[(?:int\()?[a-zA-Z0-9_]+\)?\]\s*=\s*(?:[a-zA-Z0-9_]+\()?0\)?\n[ \t]*(?:[a-zA-Z0-9_]+\+\+|[a-zA-Z0-9_]+\s*\+=\s*1|[a-zA-Z0-9_]+\s*=\s*[a-zA-Z0-9_]+\s*\+\s*1)\n[ \t]*\}`)
+
+	// Direct copy loop:
+	// vX = 0
+	// for vX < LIMIT {
+	//     DST[vX] = SRC[vX]
+	//     vX++
+	// }
+	reCopyDirectLoop = regexp.MustCompile(`(?m)^([ \t]*)([a-zA-Z0-9_]+)\s*=\s*0\n[ \t]*for\s+([a-zA-Z0-9_]+)\s*<\s*([a-zA-Z0-9_\.]+|\([^\)]+\))\s*\{\n[ \t]*([a-zA-Z0-9_\.]+)\s*\[(?:int\()?[a-zA-Z0-9_]+\)?\]\s*=\s*([a-zA-Z0-9_\.]+)\s*\[(?:int\()?[a-zA-Z0-9_]+\)?\]\n[ \t]*(?:[a-zA-Z0-9_]+\+\+|[a-zA-Z0-9_]+\s*\+=\s*1|[a-zA-Z0-9_]+\s*=\s*[a-zA-Z0-9_]+\s*\+\s*1)\n[ \t]*\}`)
+
+	// Offset copy loop on SRC:
+	// vX = 0
+	// for vX < LIMIT {
+	//     DST[vX] = SRC[int(OFFSET + vX)]
+	//     vX++
+	// }
+	reCopySrcOffsetLoop = regexp.MustCompile(`(?m)^([ \t]*)([a-zA-Z0-9_]+)\s*=\s*0\n[ \t]*for\s+([a-zA-Z0-9_]+)\s*<\s*([0-9]+)\s*\{\n[ \t]*([a-zA-Z0-9_\.]+)\s*\[(?:int\()?[a-zA-Z0-9_]+\)?\]\s*=\s*([a-zA-Z0-9_\.]+)\s*\[(?:int\()?(?:uint64\()?([0-9]+)\)?\s*\+\s*([a-zA-Z0-9_]+)\)?\]\n[ \t]*(?:[a-zA-Z0-9_]+\+\+|[a-zA-Z0-9_]+\s*\+=\s*1|[a-zA-Z0-9_]+\s*=\s*[a-zA-Z0-9_]+\s*\+\s*1)\n[ \t]*\}`)
+
+	// Offset copy loop on DST:
+	// vX = 0
+	// for vX < LIMIT {
+	//     DST[int(OFFSET + vX)] = SRC[vX]
+	//     vX++
+	// }
+	reCopyDstOffsetLoop = regexp.MustCompile(`(?m)^([ \t]*)([a-zA-Z0-9_]+)\s*=\s*0\n[ \t]*for\s+([a-zA-Z0-9_]+)\s*<\s*([0-9]+)\s*\{\n[ \t]*([a-zA-Z0-9_\.]+)\s*\[(?:int\()?(?:uint64\()?([0-9]+)\)?\s*\+\s*([a-zA-Z0-9_]+)\)?\]\s*=\s*([a-zA-Z0-9_\.]+)\s*\[(?:int\()?[a-zA-Z0-9_]+\)?\]\n[ \t]*(?:[a-zA-Z0-9_]+\+\+|[a-zA-Z0-9_]+\s*\+=\s*1|[a-zA-Z0-9_]+\s*=\s*[a-zA-Z0-9_]+\s*\+\s*1)\n[ \t]*\}`)
+)
+
+// archTransformCopyClearLoops convertit les boucles d'assignation octet par octet
+// en appels natifs aux intrinsèques copy() et clear() du compilateur Go.
+func archTransformCopyClearLoops(src string) string {
+	src = reClearLoop.ReplaceAllStringFunc(src, func(m string) string {
+		sub := reClearLoop.FindStringSubmatch(m)
+		if len(sub) < 6 {
+			return m
+		}
+		indent := sub[1]
+		varInit := sub[2]
+		varLoop := sub[3]
+		if varInit != varLoop {
+			return m
+		}
+		limit := sub[4]
+		target := sub[5]
+		return fmt.Sprintf("%sclear(%s[:%s])", indent, target, limit)
+	})
+
+	src = reCopyDirectLoop.ReplaceAllStringFunc(src, func(m string) string {
+		sub := reCopyDirectLoop.FindStringSubmatch(m)
+		if len(sub) < 7 {
+			return m
+		}
+		indent := sub[1]
+		varInit := sub[2]
+		varLoop := sub[3]
+		if varInit != varLoop {
+			return m
+		}
+		limit := sub[4]
+		dst := sub[5]
+		srcArr := sub[6]
+		return fmt.Sprintf("%scopy(%s[:%s], %s[:%s])", indent, dst, limit, srcArr, limit)
+	})
+
+	src = reCopySrcOffsetLoop.ReplaceAllStringFunc(src, func(m string) string {
+		sub := reCopySrcOffsetLoop.FindStringSubmatch(m)
+		if len(sub) < 9 {
+			return m
+		}
+		indent := sub[1]
+		varInit := sub[2]
+		varLoop := sub[3]
+		varIndex := sub[8]
+		if varInit != varLoop || varInit != varIndex {
+			return m
+		}
+		limitStr := sub[4]
+		dst := sub[5]
+		srcArr := sub[6]
+		offsetStr := sub[7]
+		limit, err1 := strconv.Atoi(limitStr)
+		offset, err2 := strconv.Atoi(offsetStr)
+		if err1 != nil || err2 != nil {
+			return m
+		}
+		end := offset + limit
+		return fmt.Sprintf("%scopy(%s[:%s], %s[%d:%d])", indent, dst, limitStr, srcArr, offset, end)
+	})
+
+	src = reCopyDstOffsetLoop.ReplaceAllStringFunc(src, func(m string) string {
+		sub := reCopyDstOffsetLoop.FindStringSubmatch(m)
+		if len(sub) < 9 {
+			return m
+		}
+		indent := sub[1]
+		varInit := sub[2]
+		varLoop := sub[3]
+		varIndex := sub[7]
+		if varInit != varLoop || varInit != varIndex {
+			return m
+		}
+		limitStr := sub[4]
+		dst := sub[5]
+		offsetStr := sub[6]
+		srcArr := sub[8]
+		limit, err1 := strconv.Atoi(limitStr)
+		offset, err2 := strconv.Atoi(offsetStr)
+		if err1 != nil || err2 != nil {
+			return m
+		}
+		end := offset + limit
+		return fmt.Sprintf("%scopy(%s[%d:%d], %s[:%s])", indent, dst, offset, end, srcArr, limitStr)
+	})
+
 	return src
 }
 

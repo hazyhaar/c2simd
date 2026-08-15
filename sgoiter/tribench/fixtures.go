@@ -25,7 +25,7 @@ func FixturesFor(k Kind) []Fixture {
 	big := bytesOf(64*1024, 0x3C)
 
 	switch k {
-	case KindHash64, KindHash32, KindHash32Seed, KindLibInj:
+	case KindHash64, KindHash32, KindHash32Seed, KindUtf8Proc, KindFastlz1, KindMurmur128, KindLibInj:
 		return []Fixture{
 			{Name: "empty", Data: nil, Seed: 0},
 			{Name: "hello", Data: hello, Seed: 0},
@@ -60,15 +60,16 @@ func FixturesFor(k Kind) []Fixture {
 			{Name: "1k", Data: kilo, Data2: key},
 			{Name: "64k", Data: big, Data2: key},
 		}
-	case KindXor:
+	case KindXor, KindDotF32, KindCjsonCore, KindStbiPng:
 		return []Fixture{
+			{Name: "empty", Data: nil, Data2: nil},
 			{Name: "16b", Data: abc, Data2: bytesOf(16, 0xFF)},
 			{Name: "17b", Data: abcX, Data2: bytesOf(17, 0x11)},
 			{Name: "64b", Data: ones, Data2: bytesOf(64, 0x5A)},
 			{Name: "1k", Data: kilo, Data2: bytesOf(1024, 0xA5)},
 			{Name: "64k", Data: big, Data2: bytesOf(64*1024, 0xC3)},
 		}
-	case KindBlake2b, KindMD5, KindChaChaQR, KindPoly5:
+	case KindBlake2b, KindMD5, KindChaChaQR, KindPoly5, KindPolyDonna32, KindCurveDonna64, KindTweetHsalsa:
 		return []Fixture{
 			{Name: "zero", Data: nil},
 			{Name: "pattern", Data: ones},
@@ -80,6 +81,15 @@ func FixturesFor(k Kind) []Fixture {
 		return []Fixture{
 			{Name: "eq", Data: a, Data2: b},
 			{Name: "neq", Data: a, Data2: c},
+		}
+	case KindYyjsonInt:
+		return []Fixture{
+			{Name: "zero", Seed: 0},
+			{Name: "single", Seed: 7},
+			{Name: "double", Seed: 42},
+			{Name: "medium", Seed: 12345},
+			{Name: "large", Seed: 123456789},
+			{Name: "max", Seed: 0xFFFFFFFF},
 		}
 	default:
 		return []Fixture{{Name: "empty", Data: nil}}

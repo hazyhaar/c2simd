@@ -101,12 +101,23 @@ func archDeduplicateStores(src string) string {
 // archWipeToClear converts range-zero wipe loops into clear(v) builtins.
 var reRangeZero = regexp.MustCompile(`^(\t*)for _i := range ([A-Za-z0-9_.]+) \{\s*([A-Za-z0-9_.]+)\[_i\] = 0\s*\}$`)
 
+var constGlobals = map[string]bool{
+	"A": true, "A2": true, "fe_one": true, "sqrtm1": true, "d": true, "D2": true,
+	"lop_x": true, "lop_y": true, "ufactor": true, "zero": true, "r": true,
+	"base_point": true, "dirty_base_point": true, "Lm2": true, "m_inv": true,
+	"k": true, "s": true, "t": true, "half_mod_L": true, "half_ones": true,
+	"blake2b_compress_sigma": true, "chacha20_constant": true,
+}
+
 func archWipeToClear(src string) string {
 	lines := strings.Split(src, "\n")
 	out := make([]string, 0, len(lines))
 	for _, ln := range lines {
 		if m := reRangeZero.FindStringSubmatch(ln); m != nil && m[2] == m[3] {
-			out = append(out, m[1]+"clear("+m[2]+")")
+			if constGlobals[m[2]] {
+				continue
+			}
+			out = append(out, m[1]+"clear("+m[2]+"[:])")
 			continue
 		}
 		out = append(out, ln)

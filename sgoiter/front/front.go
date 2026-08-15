@@ -6,6 +6,7 @@ package front
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -55,6 +56,11 @@ func ParseFile(path string) (*ir.Module, error) {
 	if err != nil {
 		return nil, err
 	}
+	if res != nil && len(res.Skipped) > 0 {
+		for _, s := range res.Skipped {
+			fmt.Fprintf(os.Stderr, "sgoiter/front: skipped %s\n", s)
+		}
+	}
 	if res == nil || res.Module == nil {
 		return nil, &Error{Code: ErrParse, Message: "no function harvested"}
 	}
@@ -100,11 +106,12 @@ func ParsePartial(src, moduleName string) (*Result, error) {
 		return nil, &Error{Code: ErrEmpty, Message: "empty after normalize"}
 	}
 
-	m.Globals = harvestGlobalsExtra(src, harvestGlobals(src))
+	cleanRaw := stripComments(rawSrc)
+	m.Globals = harvestGlobalsExtra(cleanRaw, harvestGlobals(cleanRaw))
 	// module-level type env for nested parse
 	structEnv = m.Structs
 
-	typeCand := `void|int|int8_t|int16_t|int32_t|int64_t|uint8_t|uint16_t|uint32_t|uint64_t|size_t|u8|u16|u32|u64|uint32|uint64`
+	typeCand := `void|int|int8_t|int16_t|int32_t|int64_t|uint8_t|uint16_t|uint32_t|uint64_t|size_t|u8|u16|u32|u64|uint32|uint64|float|double`
 	reFunc := regexp.MustCompile(`(?s)(?:static\s+)?(` + typeCand + `)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*\{`)
 	locs := reFunc.FindAllStringSubmatchIndex(src, -1)
 	if len(locs) == 0 {
@@ -178,9 +185,6 @@ func rejectFuncBody(name, params, body string) error {
 	}
 	if regexp.MustCompile(`\bgoto\b`).MatchString(s) {
 		return &Error{Code: ErrGoto, Message: "goto"}
-	}
-	if regexp.MustCompile(`\bfloat\b|\bdouble\b`).MatchString(s) {
-		return &Error{Code: ErrFloat, Message: "float"}
 	}
 	if regexp.MustCompile(`\bunion\b`).MatchString(s) {
 		return &Error{Code: ErrMemory, Message: "union"}
@@ -322,9 +326,9 @@ var structEnv []ir.StructType
 func notePtr(v ir.Value, elem ir.TypeName, scale int, base ir.Value) {
 	if scale == 0 {
 		switch elem {
-		case ir.TypUint32:
+		case ir.TypUint32, ir.TypFloat32:
 			scale = 4
-		case ir.TypUint64:
+		case ir.TypUint64, ir.TypFloat64, ir.TypInt64:
 			scale = 8
 		default:
 			scale = 1
@@ -389,11 +393,16 @@ func scalePtrIndex(f *ir.Func, bv, iv ir.Value) (root, idx ir.Value, elem ir.Typ
 }
 
 func harvestGlobals(src string) []ir.Global {
-	// static const char name[] = "...";
-	re := regexp.MustCompile(`(?m)(?:static\s+)?(?:const\s+)?(?:unsigned\s+)?char\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\]\s*=\s*"([^"]*)"\s*;`)
+	// static const char name[N] = "..."; or static const char name[] = "...";
+	re := regexp.MustCompile(`(?s)(?:static\s+)?(?:const\s+)?(?:unsigned\s+)?char\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\d*\s*\]\s*=\s*((?:"[^"]*"\s*)+);`)
 	var out []ir.Global
 	for _, m := range re.FindAllStringSubmatch(src, -1) {
-		out = append(out, ir.Global{Name: m[1], Data: m[2], Type: ir.TypUint8})
+		strParts := regexp.MustCompile(`"([^"]*)"`).FindAllStringSubmatch(m[2], -1)
+		var combined string
+		for _, p := range strParts {
+			combined += p[1]
+		}
+		out = append(out, ir.Global{Name: m[1], Data: combined, Type: ir.TypUint8})
 	}
 	return out
 }
@@ -940,10 +949,10 @@ func parseIf(f *ir.Func, regs map[string]regInfo, s string) (ir.Stmt, int, error
 	}
 	total := closeP + 1 + thenN
 	var elseBody []ir.Stmt
-	tail := strings.TrimSpace(restRaw[thenN:])
-	if strings.HasPrefix(tail, "else") {
-		// compute offset of else in restRaw
-		elseAt := strings.Index(restRaw, "else")
+	tail := strings.TrimLeft(restRaw[thenN:], " \t\n\r")
+	if strings.HasPrefix(tail, "else") && (len(tail) == 4 || !isIdentChar(tail[4])) {
+		elseRel := strings.Index(restRaw[thenN:], "else")
+		elseAt := thenN + elseRel
 		afterElse := restRaw[elseAt+4:]
 		eb, en, err := parseIfBranch(f, regs, afterElse)
 		if err != nil {
@@ -979,6 +988,14 @@ func parseIfBranch(f *ir.Func, regs map[string]regInfo, s string) ([]ir.Stmt, in
 		}
 		return body, pad + 1 + len(bodySrc) + 1, nil
 	}
+	// nested if / else if
+	if strings.HasPrefix(sTrim, "if") && (len(sTrim) == 2 || !isIdentChar(sTrim[2])) {
+		st, n, err := parseIf(f, regs, sTrim)
+		if err != nil {
+			return nil, 0, err
+		}
+		return []ir.Stmt{st}, pad + n, nil
+	}
 	// single stmt until ;
 	semi, err := indexStmtEnd(sTrim)
 	if err != nil {
@@ -986,14 +1003,6 @@ func parseIfBranch(f *ir.Func, regs map[string]regInfo, s string) ([]ir.Stmt, in
 	}
 	if semi < 0 {
 		return nil, 0, &Error{Code: ErrParse, Message: "if branch"}
-	}
-	// nested if
-	if strings.HasPrefix(sTrim, "if") && nextNonSpace(sTrim[2:]) == '(' {
-		st, n, err := parseIf(f, regs, sTrim)
-		if err != nil {
-			return nil, 0, err
-		}
-		return []ir.Stmt{st}, pad + n, nil
 	}
 	ins, err := parseSimpleStmt(f, regs, strings.TrimSpace(sTrim[:semi]))
 	if err != nil {
@@ -1460,10 +1469,23 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 		}
 	}
 
+	stClean := strings.TrimSpace(st)
+	for {
+		if strings.HasPrefix(stClean, "static ") {
+			stClean = strings.TrimSpace(stClean[7:])
+		} else if strings.HasPrefix(stClean, "const ") {
+			stClean = strings.TrimSpace(stClean[6:])
+		} else if strings.HasPrefix(stClean, "volatile ") {
+			stClean = strings.TrimSpace(stClean[9:])
+		} else {
+			break
+		}
+	}
+
 	// multi decl: TYPE a, b, c;  or TYPE a=e0, b=e1;
-	if isTypeToken(firstWord(st)) && strings.Contains(st, ",") && !strings.Contains(st, "(") {
-		fw := firstWord(st)
-		rest := strings.TrimSpace(st[len(fw):])
+	if isTypeToken(firstWord(stClean)) && strings.Contains(stClean, ",") && !strings.Contains(stClean, "(") {
+		fw := firstWord(stClean)
+		rest := strings.TrimSpace(stClean[len(fw):])
 		var all []ir.Instr
 		for _, part := range splitCSV(rest) {
 			part = strings.TrimSpace(part)
@@ -1476,18 +1498,85 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 		}
 		return all, nil
 	}
-	// decl: TYPE name[N];  local array (incl. struct element type ge_cached lutA[2])
-	if isTypeToken(firstWord(st)) {
-		reArr := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(\d+)\s*\]$`)
-		if m := reArr.FindStringSubmatch(st); m != nil {
+	// decl: TYPE name[N] = { ... }; or TYPE name[R][C] = { ... }; or TYPE name[N];
+	if isTypeToken(firstWord(stClean)) {
+		initCSV := ""
+		declHead := stClean
+		if open := strings.Index(stClean, "{"); open > 0 && strings.HasSuffix(strings.TrimSpace(stClean), "}") {
+			if closeBrace, err := matchBraceFrom(stClean, open); err == nil && closeBrace == len(strings.TrimSpace(stClean))-1 {
+				initBody := stClean[open+1 : closeBrace]
+				initCSV = flattenBraceInit(initBody)
+				declHead = strings.TrimSpace(stClean[:open])
+				if strings.HasSuffix(declHead, "=") {
+					declHead = strings.TrimSpace(declHead[:len(declHead)-1])
+				}
+			}
+		}
+
+		reArr2D := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(\d+)\s*\]\s*\[\s*(\d+)\s*\]$`)
+		if m := reArr2D.FindStringSubmatch(declHead); m != nil {
 			typ := mapType(m[1])
 			sname := ""
 			if isStructType(m[1], structEnv) {
 				typ = ir.TypeName(m[1])
 				sname = m[1]
 			}
-			n, _ := strconv.Atoi(m[3])
+			r1, _ := strconv.Atoi(m[3])
+			r2, _ := strconv.Atoi(m[4])
+			total := r1 * r2
 			r := f.Alloc()
+			sym := sname
+			if initCSV != "" {
+				sym = "init:" + m[2] + ":" + initCSV
+			}
+			regs[m[2]] = regInfo{v: r, typ: typ, ptr: true, scale: 1, elemIndex: true, localArr: total, cols: r2, structName: sname}
+			notePtr(r, typ, 1, ir.NoVal)
+			pm := ptrMeta[r]
+			pm.elemIndex = true
+			pm.localArr = total
+			pm.structName = sname
+			ptrMeta[r] = pm
+			return []ir.Instr{{Op: ir.OpAlloca, Dst: r, Imm: int64(total), Elem: typ, Sym: sym}}, nil
+		}
+
+		if m := regexp.MustCompile(`^fe\s+([A-Za-z0-9_,\s]+)$`).FindStringSubmatch(declHead); m != nil {
+			var instrs []ir.Instr
+			for _, item := range strings.Split(m[1], ",") {
+				nm := strings.TrimSpace(item)
+				if nm == "" {
+					continue
+				}
+				r := f.Alloc()
+				regs[nm] = regInfo{v: r, typ: ir.TypInt, ptr: true, scale: 1, elemIndex: true, localArr: 10}
+				notePtr(r, ir.TypInt, 1, ir.NoVal)
+				pm := ptrMeta[r]
+				pm.elemIndex = true
+				pm.localArr = 10
+				ptrMeta[r] = pm
+				instrs = append(instrs, ir.Instr{Op: ir.OpAlloca, Dst: r, Imm: 10, Elem: ir.TypInt})
+			}
+			return instrs, nil
+		}
+
+		reArr := regexp.MustCompile(`(?s)^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(\d+)?\s*\]$`)
+		if m := reArr.FindStringSubmatch(declHead); m != nil && (m[3] != "" || initCSV != "") {
+			typ := mapType(m[1])
+			sname := ""
+			if isStructType(m[1], structEnv) {
+				typ = ir.TypeName(m[1])
+				sname = m[1]
+			}
+			n := 0
+			if m[3] != "" {
+				n, _ = strconv.Atoi(m[3])
+			} else if initCSV != "" {
+				n = len(strings.Split(initCSV, ","))
+			}
+			r := f.Alloc()
+			sym := sname
+			if initCSV != "" {
+				sym = "init:" + m[2] + ":" + initCSV
+			}
 			regs[m[2]] = regInfo{v: r, typ: typ, ptr: true, scale: 1, elemIndex: true, localArr: n, structName: sname}
 			notePtr(r, typ, 1, ir.NoVal)
 			pm := ptrMeta[r]
@@ -1495,8 +1584,28 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 			pm.localArr = n
 			pm.structName = sname
 			ptrMeta[r] = pm
-			return []ir.Instr{{Op: ir.OpAlloca, Dst: r, Imm: int64(n), Elem: typ, Sym: sname}}, nil
+			return []ir.Instr{{Op: ir.OpAlloca, Dst: r, Imm: int64(n), Elem: typ, Sym: sym}}, nil
 		}
+		reStructInit := regexp.MustCompile(`^(?:struct\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)$`)
+		if m := reStructInit.FindStringSubmatch(declHead); m != nil && isStructType(m[1], structEnv) {
+			sname := m[1]
+			r := f.Alloc()
+			sym := "struct:" + sname
+			if initCSV != "" {
+				sym = "struct_init:" + sname + ":" + m[2] + ":" + initCSV
+			}
+			regs[m[2]] = regInfo{v: r, typ: ir.TypeName(sname), ptr: true, scale: 1, elemIndex: false, structName: sname}
+			notePtr(r, ir.TypeName(sname), 1, ir.NoVal)
+			pm := ptrMeta[r]
+			pm.structName = sname
+			ptrMeta[r] = pm
+			return []ir.Instr{{Op: ir.OpAlloca, Dst: r, Imm: 1, Elem: ir.TypeName(sname), Sym: sym}}, nil
+		}
+
+		if initCSV != "" {
+			return nil, &Error{Code: ErrParse, Message: "unsupported aggregate initializer: " + stClean}
+		}
+
 		// TYPE * name = expr  OR TYPE name = expr OR TYPE name
 		re := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*(\*)?\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:=\s*(.+))?$`)
 		m := re.FindStringSubmatch(st)
@@ -2215,6 +2324,21 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 		}
 	}
 
+	// unary logical not !
+	if strings.HasPrefix(expr, "!") && len(expr) > 1 && expr[1] != '=' {
+		inner, err := parseExpr(f, regs, strings.TrimSpace(expr[1:]))
+		if err != nil {
+			return ir.NoVal, err
+		}
+		z := f.Alloc()
+		dst := f.Alloc()
+		ensureScratch(f)
+		f.Body = append(f.Body,
+			ir.Instr{Op: ir.OpConst, Dst: z, Imm: 0},
+			ir.Instr{Op: ir.OpCall, Dst: dst, Args: []ir.Value{inner, z}, Sym: "__cmp_=="},
+		)
+		return dst, nil
+	}
 	// unary bitwise not ~
 	if strings.HasPrefix(expr, "~") {
 		inner, err := parseExpr(f, regs, strings.TrimSpace(expr[1:]))
@@ -2732,6 +2856,21 @@ afterCall:
 		f.Body = append(f.Body, ir.Instr{Op: ir.OpConst, Dst: dst, Imm: n})
 		return dst, nil
 	}
+	cleanedExpr := strings.TrimSuffix(strings.TrimSuffix(expr, "f"), "F")
+	if flt, err := strconv.ParseFloat(cleanedExpr, 64); err == nil && (strings.ContainsAny(cleanedExpr, ".eE") || strings.HasSuffix(expr, "f") || strings.HasSuffix(expr, "F")) {
+		dst := f.Alloc()
+		ensureScratch(f)
+		elemTyp := ir.TypFloat64
+		var imm int64
+		if strings.HasSuffix(expr, "f") || strings.HasSuffix(expr, "F") {
+			elemTyp = ir.TypFloat32
+			imm = int64(math.Float32bits(float32(flt)))
+		} else {
+			imm = int64(math.Float64bits(flt))
+		}
+		f.Body = append(f.Body, ir.Instr{Op: ir.OpConst, Dst: dst, Imm: imm, Elem: elemTyp, Sym: expr})
+		return dst, nil
+	}
 	// char literal 'x' or '\n' or '\0'
 	if len(expr) >= 3 && expr[0] == '\'' && expr[len(expr)-1] == '\'' {
 		inner := expr[1 : len(expr)-1]
@@ -3096,6 +3235,39 @@ func tryArrayInitDecl(f *ir.Func, regs map[string]regInfo, rest string) (int, []
 		break
 	}
 	body := s[pos:]
+	reHeadStruct := regexp.MustCompile(`^(?:struct\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{`)
+	if mStruct := reHeadStruct.FindStringSubmatch(body); mStruct != nil && isStructType(mStruct[1], structEnv) {
+		sname := mStruct[1]
+		name := mStruct[2]
+		openRel := strings.Index(body, "{")
+		closeRel, err := matchBraceFrom(body, openRel)
+		if err != nil {
+			return 0, nil, &Error{Code: ErrParse, Message: "struct init brace: " + name}
+		}
+		end := lead + pos + closeRel + 1
+		for end < len(rest) && rest[end] != ';' {
+			end++
+		}
+		if end >= len(rest) || rest[end] != ';' {
+			return 0, nil, &Error{Code: ErrParse, Message: "struct init ;"}
+		}
+		end++
+		initBody := body[openRel+1 : closeRel]
+		initCSV := flattenBraceInit(initBody)
+		r := f.Alloc()
+		sym := "struct:" + sname
+		if initCSV != "" {
+			sym = "struct_init:" + sname + ":" + name + ":" + initCSV
+		}
+		regs[name] = regInfo{v: r, typ: ir.TypeName(sname), ptr: true, scale: 1, elemIndex: false, structName: sname}
+		notePtr(r, ir.TypeName(sname), 1, ir.NoVal)
+		pm := ptrMeta[r]
+		pm.structName = sname
+		ptrMeta[r] = pm
+		st := ir.Stmt{Kind: ir.SKInstr, Ins: ir.Instr{Op: ir.OpAlloca, Dst: r, Imm: 1, Elem: ir.TypeName(sname), Sym: sym}}
+		return end, []ir.Stmt{st}, nil
+	}
+
 	reHead := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*((?:\[\s*\d+\s*\])+)\s*=\s*\{`)
 	m := reHead.FindStringSubmatch(body)
 	if m == nil || !isTypeToken(m[1]) {
@@ -3157,7 +3329,19 @@ func tryArrayInitDecl(f *ir.Func, regs map[string]regInfo, rest string) (int, []
 		if isZeroInit(initBody) {
 			g.ZeroLen = total
 		} else {
-			g.InitCSV = flattenBraceInit(initBody)
+			csv := flattenBraceInit(initBody)
+			var parts []string
+			for _, p := range strings.Split(csv, ",") {
+				if s := strings.TrimSpace(p); s != "" {
+					parts = append(parts, s)
+				}
+			}
+			if total > 0 && len(parts) < total {
+				for len(parts) < total {
+					parts = append(parts, "0")
+				}
+			}
+			g.InitCSV = strings.Join(parts, ", ")
 		}
 		pendingGlobals = append(pendingGlobals, g)
 		r := f.Alloc()
@@ -3173,7 +3357,11 @@ func tryArrayInitDecl(f *ir.Func, regs map[string]regInfo, rest string) (int, []
 		return end, []ir.Stmt{st}, nil
 	}
 
-	// 1D small local (mutable / zero-init)
+	// 1D small local (mutable / non-zero or zero-init)
+	sym := ""
+	if !isZeroInit(initBody) {
+		sym = "init:" + name + ":" + flattenBraceInit(initBody)
+	}
 	r := f.Alloc()
 	regs[name] = regInfo{v: r, typ: typ, ptr: true, scale: 1, elemIndex: true, localArr: total}
 	notePtr(r, typ, 1, ir.NoVal)
@@ -3181,12 +3369,16 @@ func tryArrayInitDecl(f *ir.Func, regs map[string]regInfo, rest string) (int, []
 	pm.elemIndex = true
 	pm.localArr = total
 	ptrMeta[r] = pm
-	st := ir.Stmt{Kind: ir.SKInstr, Ins: ir.Instr{Op: ir.OpAlloca, Dst: r, Imm: int64(total), Elem: typ}}
+	st := ir.Stmt{Kind: ir.SKInstr, Ins: ir.Instr{Op: ir.OpAlloca, Dst: r, Imm: int64(total), Elem: typ, Sym: sym}}
 	return end, []ir.Stmt{st}, nil
 }
 
 func isSpace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+}
+
+func isIdentChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
 }
 
 func matchBraceFrom(s string, open int) (int, error) {
@@ -3260,11 +3452,12 @@ type pendingAllocaItem struct {
 func isTypeToken(s string) bool {
 	s = strings.TrimSpace(s)
 	switch s {
-	case "void", "int", "char",
+	case "void", "int", "char", "fe",
 		"int8_t", "int16_t", "int32_t", "int64_t",
 		"uint8_t", "uint16_t", "uint32_t", "uint64_t",
 		"uint32", "uint64", "size_t", "u8", "u16", "u32", "u64",
-		"i8", "i16", "i32", "i64":
+		"i8", "i16", "i32", "i64",
+		"float", "double", "float32", "float64":
 		return true
 	default:
 		if isStructType(s, structEnv) {
@@ -3297,6 +3490,10 @@ func mapType(s string) ir.TypeName {
 		return ir.TypUint64
 	case "int64_t", "i64", "long long":
 		return ir.TypInt64
+	case "float", "float32":
+		return ir.TypFloat32
+	case "double", "float64":
+		return ir.TypFloat64
 	case "void":
 		return ir.TypVoid
 	default:

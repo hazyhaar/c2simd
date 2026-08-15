@@ -103,6 +103,7 @@ type Options struct {
 	OutDir     string
 	SgoiterBin string
 	CcgoBin    string
+	Libs       []Lib    // override default catalog
 	Only       []string // filter lib IDs
 	SkipCcgo   bool
 	SkipBench  bool
@@ -141,7 +142,10 @@ func Run(opt Options) (*Report, error) {
 		OutDir:    opt.OutDir,
 	}
 
-	libs := DefaultLibs(opt.C2simdRoot)
+	libs := opt.Libs
+	if len(libs) == 0 {
+		libs = DefaultLibs(opt.C2simdRoot)
+	}
 	if len(opt.Only) > 0 {
 		allow := map[string]bool{}
 		for _, id := range opt.Only {

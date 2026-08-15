@@ -8,16 +8,17 @@ cd "$MOD"
 OUT="spec/dogfood/testdata/cycles/20260810k_monocypher/sgoiter_out"
 AMALG="spec/c_sources/upstream/monocypher/4.0.2/monocypher_amalg.c"
 mkdir -p "$OUT"
-EXCLUDES="Slide_init,Slide_step,Remove_l,Mod_l,Invsqrt,Lookup_add,Crypto_argon2,Crypto_elligator_key_pair,Crypto_chacha20_djb,Crypto_x25519_dirty_small,Poly_blocks,Ge_scalarmult_base,Crypto_eddsa_check_equation,Crypto_aead_write,Slide_ctx"
+EXCLUDES="Slide_init,Slide_step,Remove_l,Mod_l,Invsqrt,Lookup_add,Crypto_argon2,Crypto_elligator_key_pair,Crypto_chacha20_djb,Crypto_x25519_dirty_small,Poly_blocks,Ge_scalarmult_base,Crypto_eddsa_check_equation,Crypto_aead_write,Crypto_aead_read,Slide_ctx,Scalarmult"
 ./bin/sgoiter -in "$AMALG" -out "$OUT/monocypher_aead_sgoiter.go" -exclude "$EXCLUDES"
 sed -i 's/^package .*/package monocypher_amalg/' "$OUT/monocypher_aead_sgoiter.go"
 python3 sgoiter/scripts/postprocess_monocypher_go.py "$OUT/monocypher_aead_sgoiter.go"
+gofmt -w "$OUT/monocypher_aead_sgoiter.go"
 printf 'module monocypher_amalg\n\ngo 1.27\n' >"$OUT/go.mod"
 DST="/devhoros/pkg/monocypher55"
 if [[ -d "$DST" ]]; then
-  sed 's/^package monocypher_amalg/package monocypher55/' \
-    "$OUT/monocypher_aead_sgoiter.go" >"$DST/monocypher_aead_sgoiter.go"
-  echo "  synced $DST/monocypher_aead_sgoiter.go"
+  rm -f "$DST/monocypher_aead_sgoiter.go" "$DST/monocypher_aead_sgoiter.go.bak"
+  ./bin/sgoiter -in "$OUT/monocypher_aead_sgoiter.go" -pkg monocypher55 -split-dir "$DST"
+  echo "  synced modular domain files in $DST"
   # mechanical comb tables from C (bit-exact)
   python3 sgoiter/scripts/extract_comb_tables.py \
     spec/c_sources/upstream/monocypher/4.0.2/monocypher.c \
@@ -29,6 +30,7 @@ if [[ -d "$DST" ]]; then
            hand_poly1305_simd.go \
            hand_aead_fused.go \
            hand_x25519_dirty_small.go \
+           hand_curve25519_donna.go \
            ge_scalarmult_base.go eddsa_check_equation.go \
            b_comb_low_table.go b_comb_high_table.go b_window_table.go; do
     if [[ -f "$DST/$h" ]]; then

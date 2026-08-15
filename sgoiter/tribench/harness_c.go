@@ -41,6 +41,26 @@ func GenHarnessC(lib Lib) string {
 		fmt.Fprintf(&b, "int %s(const uint8_t *x, const uint8_t *y);\n", lib.CFunc)
 	case KindLibInj:
 		fmt.Fprintf(&b, "size_t %s(const uint8_t *s, size_t len);\n", lib.CFunc)
+	case KindDotF32:
+		fmt.Fprintf(&b, "void %s(const float *a, const float *b, size_t n, double *result);\n", lib.CFunc)
+	case KindPolyDonna32:
+		fmt.Fprintf(&b, "void %s(uint32_t h[5], const uint32_t r[5], const uint8_t in[16], uint32_t hibit);\n", lib.CFunc)
+	case KindCurveDonna64:
+		fmt.Fprintf(&b, "void %s(uint64_t out[5], const uint64_t in[5]);\n", lib.CFunc)
+	case KindYyjsonInt:
+		fmt.Fprintf(&b, "size_t %s(char *buf, uint32_t val);\n", lib.CFunc)
+	case KindCjsonCore:
+		fmt.Fprintf(&b, "int %s(const uint8_t *s1, const uint8_t *s2, size_t n);\n", lib.CFunc)
+	case KindStbiPng:
+		fmt.Fprintf(&b, "void %s(uint8_t *recon, const uint8_t *scanline, const uint8_t *prev, size_t len, int bpp, int filter_type);\n", lib.CFunc)
+	case KindUtf8Proc:
+		fmt.Fprintf(&b, "int64_t %s(const uint8_t *str, size_t strlen, int32_t *dst);\n", lib.CFunc)
+	case KindFastlz1:
+		fmt.Fprintf(&b, "int %s(const uint8_t *input, int in_len, uint8_t *output, int maxout);\n", lib.CFunc)
+	case KindMurmur128:
+		fmt.Fprintf(&b, "void %s(const uint8_t *key, size_t len, uint32_t seed, uint64_t out[2]);\n", lib.CFunc)
+	case KindTweetHsalsa:
+		fmt.Fprintf(&b, "int %s(uint8_t *out, const uint8_t *in, const uint8_t *k, const uint8_t *c);\n", lib.CFunc)
 	}
 
 	b.WriteString(`
@@ -50,15 +70,15 @@ static void hex_buf(const uint8_t *p, size_t n) {
   size_t i; for (i = 0; i < n; i++) printf("%02x", p[i]);
 }
 `)
-	if lib.Kind == KindXor {
-		b.WriteString("/* minimal sha256 for xor digests */\n")
+	if lib.Kind == KindXor || lib.Kind == KindStbiPng {
+		b.WriteString("/* minimal sha256 for digests */\n")
 		b.WriteString(sha256CSnippet)
 	}
 	b.WriteString("\nint main(void) {\n")
 
 	// embed fixtures as C arrays
 	fixs := FixturesFor(lib.Kind)
-	usesData := lib.Kind != KindChaChaQR && lib.Kind != KindPoly5
+	usesData := lib.Kind != KindChaChaQR && lib.Kind != KindPoly5 && lib.Kind != KindPolyDonna32 && lib.Kind != KindCurveDonna64 && lib.Kind != KindYyjsonInt && lib.Kind != KindTweetHsalsa
 	for i, f := range fixs {
 		fmt.Fprintf(&b, "  /* fixture %s */\n", f.Name)
 		if usesData {
@@ -81,9 +101,13 @@ static void hex_buf(const uint8_t *p, size_t n) {
 		case KindSipHash:
 			fmt.Fprintf(&b, "  { uint64_t h = %s(d%d, %d, e%d); hex_u64(h); printf(\"\\n\"); }\n", lib.CFunc, i, len(f.Data), i)
 		case KindXor:
-			fmt.Fprintf(&b, `  { uint8_t *dst = (uint8_t*)malloc(%d); %s(dst, d%d, e%d, %d);
+			if len(f.Data) == 0 || len(f.Data2) == 0 {
+				fmt.Fprintf(&b, "  printf(\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\\n\");\n")
+			} else {
+				fmt.Fprintf(&b, `  { uint8_t *dst = (uint8_t*)malloc(%d); %s(dst, d%d, e%d, %d);
     uint8_t dig[32]; sha256_buf(dst, %d, dig); hex_buf(dig, 32); printf("\n"); free(dst); }
 `, len(f.Data), lib.CFunc, i, i, len(f.Data), len(f.Data))
+			}
 		case KindBlake2b:
 			fmt.Fprintf(&b, `  { uint64_t h[8] = {0}; uint8_t block[128]; memset(block, 0, 128);
     size_t n = %d; if (n > 128) n = 128; if (n) memcpy(block, d%d, n);
@@ -103,6 +127,61 @@ static void hex_buf(const uint8_t *p, size_t n) {
 			fmt.Fprintf(&b, `  { uint32_t h[5]={0}, r[5]={1,2,3,4,5}, m[4]={9,8,7,6};
     %s(h,r,m); int j; for(j=0;j<5;j++) hex_u32(h[j]); printf("\n"); }
 `, lib.CFunc)
+		case KindPolyDonna32:
+			fmt.Fprintf(&b, `  { uint32_t h[5]={0}, r[5]={0x3ffffff,0x3fffffe,0x3fffffd,0x3fffffc,0x3fffffb};
+    uint8_t block[16]; memset(block, 0x5a, 16);
+    %s(h, r, block, 1 << 24);
+    int j; for(j=0;j<5;j++) hex_u32(h[j]); printf("\n"); }
+`, lib.CFunc)
+		case KindCurveDonna64:
+			fmt.Fprintf(&b, `  { uint64_t in[5]={0x123456789ULL, 0x23456789aULL, 0x3456789abULL, 0x456789abcULL, 0x56789abcdULL};
+    uint64_t out[5]={0};
+    %s(out, in);
+    int j; for(j=0;j<5;j++) hex_u64(out[j]); printf("\n"); }
+`, lib.CFunc)
+		case KindYyjsonInt:
+			fmt.Fprintf(&b, "  { char buf[32]; size_t n = %s(buf, %dU); printf(\"%%.*s\\n\", (int)n, buf); }\n", lib.CFunc, f.Seed)
+		case KindCjsonCore:
+			if len(f.Data) == 0 || len(f.Data2) == 0 {
+				fmt.Fprintf(&b, "  printf(\"0\\n\");\n")
+			} else {
+				fmt.Fprintf(&b, "  { int r = %s(d%d, e%d, %d); printf(\"%%d\\n\", r); }\n", lib.CFunc, i, i, len(f.Data))
+			}
+		case KindStbiPng:
+			if len(f.Data) == 0 || len(f.Data2) == 0 {
+				fmt.Fprintf(&b, "  printf(\"00000000\\n\");\n")
+			} else {
+				fmt.Fprintf(&b, `  { uint8_t *recon = (uint8_t*)malloc(%d);
+    %s(recon, d%d, e%d, %d, 4, 4);
+    uint8_t dig[32]; sha256_buf(recon, %d, dig); hex_buf(dig, 32); printf("\n"); free(recon); }
+`, len(f.Data), lib.CFunc, i, i, len(f.Data), len(f.Data))
+			}
+		case KindUtf8Proc:
+			if len(f.Data) == 0 {
+				fmt.Fprintf(&b, "  printf(\"0 0\\n\");\n")
+			} else {
+				fmt.Fprintf(&b, "  { int32_t uc = 0; int64_t r = %s(d%d, %d, &uc); printf(\"%%lld %%d\\n\", (long long)r, uc); }\n", lib.CFunc, i, len(f.Data))
+			}
+		case KindFastlz1:
+			if len(f.Data) == 0 {
+				fmt.Fprintf(&b, "  printf(\"0\\n\");\n")
+			} else {
+				fmt.Fprintf(&b, `  { uint8_t *out = (uint8_t*)malloc(%d * 4 + 64);
+    int r = %s(d%d, %d, out, %d * 4 + 64);
+    printf("%%d\n", r); free(out); }
+`, len(f.Data), lib.CFunc, i, len(f.Data), len(f.Data))
+			}
+		case KindMurmur128:
+			fmt.Fprintf(&b, "  { uint64_t out[2] = {0}; %s(d%d, %d, %dU, out); hex_u64(out[0]); hex_u64(out[1]); printf(\"\\n\"); }\n", lib.CFunc, i, len(f.Data), f.Seed)
+		case KindTweetHsalsa:
+			fmt.Fprintf(&b, `  { uint8_t in[16]={1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
+    uint8_t k[32]={0x10,0x20,0x30,0x40,0x50,0x60,0x70,0x80,0x90,0xa0,0xb0,0xc0,0xd0,0xe0,0xf0,0x01,
+                   0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x11,0x22};
+    uint8_t c[16]="expand 32-byte k";
+    uint8_t out[32]={0};
+    %s(out, in, k, c);
+    hex_buf(out, 32); printf("\n"); }
+`, lib.CFunc)
 		case KindBase64:
 			// dst must hold 4/3 * len + pad
 			dstN := (len(f.Data)+2)/3*4 + 8
@@ -115,6 +194,21 @@ static void hex_buf(const uint8_t *p, size_t n) {
 		case KindLibInj:
 			// 2-arg form (accept internal); size_t / uint64_t return
 			fmt.Fprintf(&b, "  { uint64_t r = (uint64_t)%s(d%d, %d); hex_u64(r); printf(\"\\n\"); }\n", lib.CFunc, i, len(f.Data))
+		case KindDotF32:
+			if len(f.Data) == 0 || len(f.Data2) == 0 {
+				fmt.Fprintf(&b, "  printf(\"%%.6e\\n\", 0.0);\n")
+			} else {
+				fmt.Fprintf(&b, `  { double res = 0.0; size_t n = %d / sizeof(float);
+    if (n > 0) {
+      float *a = (float*)malloc(n * sizeof(float));
+      float *b = (float*)malloc(n * sizeof(float));
+      for (size_t j = 0; j < n; j++) { a[j] = (float)d%d[j*4]; b[j] = (float)e%d[j*4]; }
+      %s(a, b, n, &res);
+      free(a); free(b);
+    }
+    printf("%%.6e\n", res); }
+`, len(f.Data), i, i, lib.CFunc)
+			}
 		}
 	}
 	b.WriteString("  return 0;\n}\n")

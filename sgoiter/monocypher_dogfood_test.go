@@ -22,7 +22,7 @@ func TestMonocypherSgoiterDogfoodKATs(t *testing.T) {
 	}
 	cmd := exec.Command("go", "test", "-count=1", ".")
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "GOWORK=off")
+	cmd.Env = append(os.Environ(), "GOWORK=off", "GOTOOLCHAIN=local")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("dogfood KAT failed: %v\n%s", err, out)

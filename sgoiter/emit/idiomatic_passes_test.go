@@ -103,6 +103,18 @@ func TestArchBuiltinMinMax(t *testing.T) {
 	if gotSimple != wantSimple {
 		t.Errorf("archBuiltinMinMax simple = %q; want %q", gotSimple, wantSimple)
 	}
+
+	inLE := `v10 = func() uint64 { if v1 <= v2 { return v1 }; return v2 }()`
+	wantLE := `v10 = min(v1, v2)`
+	if gotLE := archBuiltinMinMax(inLE); gotLE != wantLE {
+		t.Errorf("archBuiltinMinMax <= = %q; want %q", gotLE, wantLE)
+	}
+
+	inGE := `v10 = func() uint64 { if v1 >= v2 { return v1 }; return v2 }()`
+	wantGE := `v10 = max(v1, v2)`
+	if gotGE := archBuiltinMinMax(inGE); gotGE != wantGE {
+		t.Errorf("archBuiltinMinMax >= = %q; want %q", gotGE, wantGE)
+	}
 }
 
 func TestArchBalanceAdditionTrees(t *testing.T) {
@@ -124,8 +136,8 @@ func TestArchFoldPingPongCasts(t *testing.T) {
 }
 
 func TestArchStripRedundantLiteralCasts(t *testing.T) {
-	in := "\tif ctx.C_idx == uint64(16) { ctx.C_idx = 0 }\n\tif v3 != uint32(64) { v4 = 0 }"
-	want := "\tif ctx.C_idx == 16 { ctx.C_idx = 0 }\n\tif v3 != 64 { v4 = 0 }"
+	in := "\tif ctx.C_idx == uint64(16) { ctx.C_idx = 0 }\n\tif v3 != uint32(64) { v4 = 0 }\n\tif v5 < uint64(32) { v5 += uint64(1) }"
+	want := "\tif ctx.C_idx == 16 { ctx.C_idx = 0 }\n\tif v3 != 64 { v4 = 0 }\n\tif v5 < 32 { v5 += 1 }"
 	got := archStripRedundantLiteralCasts(in)
 	if got != want {
 		t.Errorf("archStripRedundantLiteralCasts = %q; want %q", got, want)

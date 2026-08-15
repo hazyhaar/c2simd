@@ -20,9 +20,11 @@ func TestNoOracleKernelIsNotCountedAsMatch(t *testing.T) {
 		C2simdRoot: root,
 		OutDir:     t.TempDir(),
 		SgoiterBin: sgo,
-		Only:       []string{"libinjection_sqli"},
-		SkipBench:  true,
-		SkipCcgo:   true,
+		Libs: []tribench.Lib{
+			{ID: "dummy_no_oracle", Kind: tribench.KindXor, CRel: filepath.Join(root, "spec/c_sources/testdata/c_sources/fast_xor.c"), SgoFunc: "Fast_xor_bytes", SkipC: true},
+		},
+		SkipBench: true,
+		SkipCcgo:  true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -32,7 +34,7 @@ func TestNoOracleKernelIsNotCountedAsMatch(t *testing.T) {
 	}
 	lr := rep.Libs[0]
 	if !lr.NoOracle {
-		t.Fatalf("libinjection_sqli has no C backend: expected NoOracle, got %+v", lr)
+		t.Fatalf("dummy_no_oracle has no C backend: expected NoOracle, got %+v", lr)
 	}
 	if lr.Oracle != "" {
 		t.Errorf("oracle_backend=%q, want empty — sgoiter is not its own oracle", lr.Oracle)

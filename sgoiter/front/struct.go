@@ -33,12 +33,18 @@ func harvestTypedefs(src string) map[string]TypedefInfo {
 	return m
 }
 
-// harvestStructs parses typedef struct { fields } Name;
+// harvestStructs parses struct Tag { fields }; and typedef struct { fields } Name;
 func harvestStructs(src string) []ir.StructType {
-	re := regexp.MustCompile(`typedef\s+struct\s*\{([^}]*)\}\s*([A-Za-z_][A-Za-z0-9_]*)\s*;`)
+	re := regexp.MustCompile(`(?:typedef\s+)?struct(?:\s+([A-Za-z_][A-Za-z0-9_]*))?\s*\{([^}]*)\}\s*([A-Za-z_][A-Za-z0-9_]*)?\s*;`)
 	var out []ir.StructType
 	for _, m := range re.FindAllStringSubmatch(src, -1) {
-		body, name := m[1], m[2]
+		tag, body, name := m[1], m[2], m[3]
+		if name == "" {
+			name = tag
+		}
+		if name == "" {
+			continue
+		}
 		body = stripComments(body)
 		var fields []ir.StructField
 		for _, line := range strings.Split(body, ";") {
@@ -167,18 +173,36 @@ func harvestGlobalsExtra(src string, base []ir.Global) []ir.Global {
 		} else if strings.Contains(head, "u32") || strings.Contains(head, "uint32") {
 			typ = ir.TypUint32
 		}
+		arrLen, _ := strconv.Atoi(m[2])
 		csv := strings.ReplaceAll(m[3], "\n", ",")
 		csv = regexp.MustCompile(`,+`).ReplaceAllString(csv, ",")
+		var parts []string
+		for _, p := range strings.Split(csv, ",") {
+			if s := strings.TrimSpace(p); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		if arrLen > 0 && len(parts) < arrLen {
+			for len(parts) < arrLen {
+				parts = append(parts, "0")
+			}
+		}
+		csv = strings.Join(parts, ", ")
 		out = append(out, ir.Global{Name: m[1], Type: typ, InitCSV: csv})
 		have[m[1]] = true
 	}
-	// static const fe name = { … };  (typedef i32 fe[10] — monocypher field constants)
-	reFe := regexp.MustCompile(`(?s)(?:static\s+)?(?:const\s+)?fe\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{`)
+	// static const fe name = { … }; or static const fe name[N] = { … }; (typedef i32 fe[10])
+	reFe := regexp.MustCompile(`(?s)static\s+const\s+fe\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[\s*(\d+)\s*\])?\s*=\s*\{`)
 	for _, m := range reFe.FindAllStringSubmatchIndex(src, -1) {
 		name := src[m[2]:m[3]]
 		if have[name] {
 			continue
 		}
+		rows := 1
+		if m[4] != -1 && m[5] != -1 {
+			rows, _ = strconv.Atoi(src[m[4]:m[5]])
+		}
+		total := rows * 10
 		// find opening brace of init
 		braceAt := strings.Index(src[m[0]:m[1]], "{")
 		if braceAt < 0 {
@@ -193,7 +217,16 @@ func harvestGlobalsExtra(src string, base []ir.Global) []ir.Global {
 		if csv == "" {
 			csv = "1" // fe_one = {1}
 		}
-		// pad / type int
+		var parts []string
+		for _, p := range strings.Split(csv, ",") {
+			if s := strings.TrimSpace(p); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		for len(parts) < total {
+			parts = append(parts, "0")
+		}
+		csv = strings.Join(parts, ", ")
 		out = append(out, ir.Global{Name: name, Type: ir.TypInt, InitCSV: csv})
 		have[name] = true
 	}

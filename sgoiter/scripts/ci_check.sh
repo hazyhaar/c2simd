@@ -81,16 +81,18 @@ if [[ -d "$SS_SGOI" ]]; then
   AMALG="spec/c_sources/upstream/monocypher/4.0.2/monocypher_amalg.c"
   if [[ -f "$AMALG" ]]; then
     echo "  [ci_check] vérification de la régénération mécanique de monocypher..."
-    EXCLUDES="Slide_init,Slide_step,Remove_l,Mod_l,Invsqrt,Lookup_add,Crypto_argon2,Crypto_elligator_key_pair,Crypto_chacha20_djb,Crypto_x25519_dirty_small,Poly_blocks,Ge_scalarmult_base,Crypto_eddsa_check_equation,Crypto_aead_write,Slide_ctx"
+    EXCLUDES="Slide_init,Slide_step,Remove_l,Mod_l,Invsqrt,Lookup_add,Crypto_argon2,Crypto_elligator_key_pair,Crypto_chacha20_djb,Crypto_x25519_dirty_small,Poly_blocks,Ge_scalarmult_base,Crypto_eddsa_check_equation,Crypto_aead_write,Crypto_aead_read,Slide_ctx,Scalarmult"
     /tmp/sgoiter_df/sgoiter -in "$AMALG" -out /tmp/sgoiter_df/monocypher_aead_fresh.go -exclude "$EXCLUDES"
-    sed -i 's/^package .*/package monocypher55/' /tmp/sgoiter_df/monocypher_aead_fresh.go
+    OUT_DOGFOOD="spec/dogfood/testdata/cycles/20260810k_monocypher/sgoiter_out/monocypher_aead_sgoiter.go"
+    sed -i 's/^package .*/package monocypher_amalg/' /tmp/sgoiter_df/monocypher_aead_fresh.go
     python3 sgoiter/scripts/postprocess_monocypher_go.py /tmp/sgoiter_df/monocypher_aead_fresh.go
-    if ! diff -u "$SS_SGOI/monocypher_aead_sgoiter.go" /tmp/sgoiter_df/monocypher_aead_fresh.go >/tmp/sgoiter_df/mono_diff.patch; then
-      echo "FAIL: monocypher_aead_sgoiter.go versionné ne correspond pas au Go émis frais par sgoiter (diff ci-dessous) :" >&2
+    gofmt -w /tmp/sgoiter_df/monocypher_aead_fresh.go
+    if ! diff -u "$OUT_DOGFOOD" /tmp/sgoiter_df/monocypher_aead_fresh.go >/tmp/sgoiter_df/mono_diff.patch; then
+      echo "FAIL: sgoiter_out monocypher_aead_sgoiter.go versionné ne correspond pas au Go émis frais par sgoiter (diff ci-dessous) :" >&2
       cat /tmp/sgoiter_df/mono_diff.patch >&2
       exit 1
     fi
-    echo "  [ci_check] monocypher_aead_sgoiter.go conforme à l'émission sgoiter fraîche."
+    echo "  [ci_check] sgoiter_out monocypher_aead_sgoiter.go conforme à l'émission sgoiter fraîche (diff = 0)."
   fi
   (cd "$SS_SGOI" && GOWORK=off go test -count=1 -timeout 180s .)
 else
@@ -118,6 +120,14 @@ if ! /tmp/sgoiter_df/tribench -root "$MOD" -sgoiter /tmp/sgoiter_df/sgoiter -out
   echo "FAIL: tribench non-match (see $TB_OUT/SUMMARY.md)" >&2
   exit 1
 fi
-grep -E '^- (summary|[0-9]+ kernel)' "$TB_OUT/SUMMARY.md" | sed 's/^/  /'
+echo "== secretstream55 bench gate performance floor =="
+SS_DIR="$MOD/../pkg/secretstream55"
+if [[ -d "$SS_DIR" ]]; then
+  (cd "$SS_DIR" && go test -v -count=1 -run TestBenchGate_PerformanceFloor .)
+  echo "  OK secretstream55 bench gate >= 2000 MB/s (ref 8164952)"
+fi
 
 echo "sgoiter ci_check OK"
+
+
+

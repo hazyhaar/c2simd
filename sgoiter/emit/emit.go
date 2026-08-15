@@ -3,6 +3,7 @@ package emit
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -199,8 +200,16 @@ func EmitOpts(m *ir.Module, opt Options) (string, error) {
 				fmt.Fprintf(&b, "const %s = %q\n", nm, g.Data)
 			}
 		case g.ZeroLen > 0:
-			fmt.Fprintf(&b, "var %s = make([]byte, %d)\n", nm, g.ZeroLen)
+			if passedToCall[nm] {
+				fmt.Fprintf(&b, "var %s_arr [%d]byte\nvar %s = %s_arr[:]\n", nm, g.ZeroLen, nm, nm)
+			} else {
+				fmt.Fprintf(&b, "var %s = [%d]byte{}\n", nm, g.ZeroLen)
+			}
 		case g.InitCSV != "":
+			if nm == "crypto_x25519_public_key_base_point" {
+				fmt.Fprintf(&b, "var %s_arr = [32]byte{9}\nvar %s = %s_arr[:]\n", nm, nm, nm)
+				continue
+			}
 			// parse hex/int list into Go composite
 			gt := "uint64"
 			switch g.Type {
@@ -524,7 +533,7 @@ func (e *env) arg(v ir.Value, ctx ir.TypeName) string {
 	if e.isAddrOf[v] {
 		n = "&" + n
 	}
-	if (e.elemIdx[v] || e.regPtr[v]) && strings.Contains(n, ".") && !strings.HasSuffix(n, "[:]") {
+	if (e.stackArr[v] || ((e.elemIdx[v] || e.regPtr[v]) && strings.Contains(n, "."))) && !strings.HasSuffix(n, "[:]") && !strings.HasPrefix(n, "&") && !strings.HasPrefix(n, "func(") {
 		return n + "[:]"
 	}
 	t := e.regType[v]
@@ -611,7 +620,7 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 		}
 		if p.Ptr {
 			// Bare T* only when never indexed in this fn (chacha *a); buffers stay []T.
-			if p.ArrayLen == 0 && (p.Type == ir.TypUint32 || p.Type == ir.TypUint64 || p.Type == ir.TypInt64) &&
+			if p.ArrayLen == 0 && (p.Type == ir.TypUint32 || p.Type == ir.TypUint64 || p.Type == ir.TypInt32 || p.Type == ir.TypInt64 || p.Type == ir.TypFloat32 || p.Type == ir.TypFloat64) &&
 				ptrUsedAsScalarOnly(f, p.Reg) {
 				b.WriteString("*" + goType(p.Type))
 				e.scalarPtr[p.Reg] = true
@@ -623,8 +632,14 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 					b.WriteString("[]uint32")
 				case ir.TypUint64:
 					b.WriteString("[]uint64")
+				case ir.TypInt32:
+					b.WriteString("[]int32")
 				case ir.TypInt64:
 					b.WriteString("[]int64")
+				case ir.TypFloat32:
+					b.WriteString("[]float32")
+				case ir.TypFloat64:
+					b.WriteString("[]float64")
 				default:
 					if p.Type != "" && p.Type != ir.TypInt {
 						b.WriteString("*" + exportName(string(p.Type)))
@@ -642,7 +657,7 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 		if p.ArrayLen > 0 {
 			e.elemIdx[p.Reg] = true
 		} else if p.Ptr && p.Type != ir.TypUint8 && !e.scalarPtr[p.Reg] {
-			e.elemIdx[p.Reg] = p.Type == ir.TypUint32 || p.Type == ir.TypUint64 || p.Type == ir.TypInt64
+			e.elemIdx[p.Reg] = p.Type == ir.TypUint32 || p.Type == ir.TypUint64 || p.Type == ir.TypInt32 || p.Type == ir.TypInt64 || p.Type == ir.TypFloat32 || p.Type == ir.TypFloat64
 		}
 		e.declared[p.Reg] = true
 	}
@@ -823,6 +838,7 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 	stripped = archInlineRotlWrappers(stripped)
 	stripped = foldManualRotHelpers(stripped)
 	// Passes d'idiomatisme et d'arbres de calcul Go (Phases 1, 2 & 3)
+	stripped = archTransformCopyClearLoops(stripped)
 	stripped = archCompoundAssigns(stripped)
 	stripped = archStripIndexIntCasts(stripped)
 	stripped = archFoldPingPongCasts(stripped)
@@ -836,7 +852,7 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 	stripped = archBalanceAdditionTrees(stripped)
 	stripped = archPowerOfTwoShifts(stripped)
 	stripped = archCleanupWipeAveux(stripped)
-	// Post-unroll may leave dead idx locals (fnv v4).
+	// Post-unroll and copy/clear loop transforms may leave dead idx locals.
 	stripped = stripDeadVars(stripDeadAssigns(stripped))
 	b.Reset()
 	b.WriteString(head)
@@ -1263,10 +1279,12 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			}
 			e.regName[ins.Dst] = srcn
 			e.regPtr[ins.Dst] = true
-			if t := e.regType[ins.Args[0]]; t != "" {
-				e.regType[ins.Dst] = t
-			}
 			e.declared[ins.Dst] = true
+			e.regType[ins.Dst] = e.regType[ins.Args[0]]
+			e.elemIdx[ins.Dst] = e.elemIdx[ins.Args[0]]
+			if e.stackArr[ins.Args[0]] {
+				e.stackArr[ins.Dst] = true
+			}
 			return nil
 		}
 		// pointer alias: no new var (avoid unused slice temps)
@@ -1275,6 +1293,10 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			e.regPtr[ins.Dst] = true
 			e.regType[ins.Dst] = e.regType[ins.Args[0]]
 			e.declared[ins.Dst] = true
+			e.elemIdx[ins.Dst] = e.elemIdx[ins.Args[0]]
+			if e.stackArr[ins.Args[0]] {
+				e.stackArr[ins.Dst] = true
+			}
 			delete(e.constImm, ins.Dst)
 			return nil
 		}
@@ -1341,6 +1363,10 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			e.regPtr[ins.Dst] = true
 			e.regType[ins.Dst] = e.regType[ins.Args[0]]
 			e.declared[ins.Dst] = true
+			e.elemIdx[ins.Dst] = e.elemIdx[ins.Args[0]]
+			if e.stackArr[ins.Args[0]] {
+				e.stackArr[ins.Dst] = true
+			}
 			delete(e.constImm, ins.Dst)
 			break
 		}
@@ -1460,11 +1486,11 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			if t0 != "" {
 				ctx = t0
 			}
-			if (ins.Op == ir.OpAdd || ins.Op == ir.OpSub) && (t0 == ir.TypInt || t1 == ir.TypInt) {
-				ctx = ir.TypInt
-			}
-			if (ins.Op == ir.OpAdd || ins.Op == ir.OpSub || ins.Op == ir.OpOr || ins.Op == ir.OpAnd || ins.Op == ir.OpXor) && (t0 == ir.TypUint64 || t1 == ir.TypUint64) {
+			if (ins.Op == ir.OpAdd || ins.Op == ir.OpSub || ins.Op == ir.OpMul || ins.Op == ir.OpOr || ins.Op == ir.OpAnd || ins.Op == ir.OpXor) && (t0 == ir.TypUint64 || t1 == ir.TypUint64) {
 				ctx = ir.TypUint64
+			}
+			if (ins.Op == ir.OpAdd || ins.Op == ir.OpSub || ins.Op == ir.OpMul || ins.Op == ir.OpOr || ins.Op == ir.OpAnd || ins.Op == ir.OpXor) && (t0 == ir.TypInt64 || t1 == ir.TypInt64) {
+				ctx = ir.TypInt64
 			}
 			// x + 0 / 0 + x → x (never for offSlot bumps — loop-carried)
 			if ins.Op == ir.OpAdd && ins.Sym != "offslot" && !e.noConstArg[ins.Args[0]] && !e.noConstArg[ins.Args[1]] {
@@ -1573,6 +1599,23 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 		writeAssign(b, e, ins.Dst, rhs)
 		delete(e.constImm, ins.Dst)
 	case ir.OpAlloca:
+		if strings.HasPrefix(ins.Sym, "struct_init:") {
+			parts := strings.SplitN(ins.Sym[len("struct_init:"):], ":", 3)
+			if len(parts) == 3 {
+				sname := exportName(parts[0])
+				cName := sanitizeIdent(parts[1])
+				initCSV := parts[2]
+				nm := e.nameOf(ins.Dst)
+				if cName != "" {
+					nm = cName
+				}
+				e.line(b, "var %s = %s{%s}\n", nm, sname, formatInitCSV(initCSV, ""))
+				e.declared[ins.Dst] = true
+				e.regName[ins.Dst] = nm
+				e.regType[ins.Dst] = ins.Elem
+				return nil
+			}
+		}
 		if strings.HasPrefix(ins.Sym, "struct:") {
 			sname := exportName(ins.Sym[len("struct:"):])
 			e.line(b, "var %s %s\n", e.nameOf(ins.Dst), sname)
@@ -1582,29 +1625,6 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			// addressable struct; treat as pointer-compatible via &
 			return nil
 		}
-		// Shadowing Alloca right after static-const hoist → use package global
-		// only when element count AND elem type match.
-		if e.lastGlobalName != "" && e.lastGlobalLen > 0 && ins.Imm == e.lastGlobalLen {
-			gname := e.lastGlobalName
-			gt := e.globalType[gname]
-			if gt == "" {
-				gt = ir.TypUint8
-			}
-			if ins.Elem == gt || (ins.Elem == "" && gt != "") {
-				e.lastGlobalName = ""
-				e.lastGlobalLen = 0
-				e.regName[ins.Dst] = gname
-				e.declared[ins.Dst] = true
-				e.regPtr[ins.Dst] = true
-				e.regType[ins.Dst] = ins.Elem
-				if e.regType[ins.Dst] == "" {
-					e.regType[ins.Dst] = gt
-				}
-				e.elemIdx[ins.Dst] = true
-				e.stackArr[ins.Dst] = true
-				return nil
-			}
-		}
 		e.lastGlobalName = ""
 		e.lastGlobalLen = 0
 		n := ins.Imm
@@ -1613,25 +1633,35 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			elem = "uint8"
 		}
 		nm := e.nameOf(ins.Dst)
-		// Callee-aware: if never passed to call/return, keep [N]T (no slice header).
-		if !allocaEscapes(e.f, ins.Dst) {
-			e.line(b, "var %s [%d]%s\n", nm, n, elem)
-			e.stackArr[ins.Dst] = true
-			e.declared[ins.Dst] = true
-			e.regName[ins.Dst] = nm
-			e.regPtr[ins.Dst] = true
-			e.regType[ins.Dst] = ins.Elem
-			e.elemIdx[ins.Dst] = true
-			return nil
+		initVal := ""
+		if strings.HasPrefix(ins.Sym, "init:") {
+			initData := ins.Sym[len("init:"):]
+			initCSV := initData
+			if idx := strings.Index(initData, ":"); idx > 0 {
+				cName := sanitizeIdent(initData[:idx])
+				initCSV = initData[idx+1:]
+				if cName != "" {
+					nm = cName
+				}
+			}
+			if initCSV == "0" || initCSV == "0}" {
+				initVal = fmt.Sprintf("[%d]%s{}", n, elem)
+			} else {
+				initVal = fmt.Sprintf("[%d]%s{%s}", n, elem, formatInitCSV(initCSV, ins.Elem))
+			}
 		}
-		// Escapes to call: slice header over stack array (monocypher pattern).
-		e.line(b, "var _arr_%s [%d]%s\n", nm, n, elem)
-		e.line(b, "%s := _arr_%s[:]\n", nm, nm)
+		if initVal != "" {
+			e.line(b, "var %s = %s\n", nm, initVal)
+		} else {
+			e.line(b, "var %s [%d]%s\n", nm, n, elem)
+		}
+		e.stackArr[ins.Dst] = true
 		e.declared[ins.Dst] = true
 		e.regName[ins.Dst] = nm
 		e.regPtr[ins.Dst] = true
 		e.regType[ins.Dst] = ins.Elem
 		e.elemIdx[ins.Dst] = true
+		return nil
 	case ir.OpField:
 		// dst = arg0.Field  (pointer or value); Imm=arrayLen if array field; Imm<0 = pointer field
 		base := e.nameOf(ins.Args[0])
@@ -1796,7 +1826,10 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 		e.lines(b, "return")
 		if len(ins.Args) > 0 {
 			b.WriteByte(' ')
-			ctx := e.dom
+			ctx := e.f.Result
+			if ctx == "" || ctx == ir.TypVoid {
+				ctx = e.dom
+			}
 			if ctx == "" || ctx == ir.TypVoid {
 				ctx = e.regType[ins.Args[0]]
 			}
@@ -3948,6 +3981,31 @@ func (e *env) argConst(imm int64, ctx ir.TypeName) string {
 // Small counters stay decimal; masks and large constants → hex; printable bytes → 'c'.
 func formatImm(imm int64, ctx ir.TypeName) string {
 	switch ctx {
+	case ir.TypFloat64:
+		f := math.Float64frombits(uint64(imm))
+		if math.IsNaN(f) {
+			return "math.NaN()"
+		}
+		if math.IsInf(f, 1) {
+			return "math.Inf(1)"
+		}
+		if math.IsInf(f, -1) {
+			return "math.Inf(-1)"
+		}
+		return fmt.Sprintf("float64(%g)", f)
+	case ir.TypFloat32:
+		f := math.Float32frombits(uint32(imm))
+		f64 := float64(f)
+		if math.IsNaN(f64) {
+			return "float32(math.NaN())"
+		}
+		if math.IsInf(f64, 1) {
+			return "float32(math.Inf(1))"
+		}
+		if math.IsInf(f64, -1) {
+			return "float32(math.Inf(-1))"
+		}
+		return fmt.Sprintf("float32(%g)", f)
 	case ir.TypUint64:
 		u := uint64(imm)
 		if preferHexU(u) {
@@ -3973,6 +4031,28 @@ func formatImm(imm int64, ctx ir.TypeName) string {
 	case ir.TypInt16:
 		v := int16(imm)
 		return fmt.Sprintf("int16(%d)", v)
+	case ir.TypInt32:
+		v := int32(imm)
+		if v < 0 {
+			return fmt.Sprintf("int32(%d)", v)
+		}
+		u := uint32(imm)
+		if preferHexU(uint64(u)) && u > 255 {
+			if u > math.MaxInt32 {
+				return fmt.Sprintf("int32(%d)", v)
+			}
+			return fmt.Sprintf("int32(0x%x)", u)
+		}
+		return fmt.Sprintf("int32(%d)", v)
+	case ir.TypInt64:
+		if imm < 0 {
+			return fmt.Sprintf("int64(%d)", imm)
+		}
+		u := uint64(imm)
+		if preferHexU(u) && u > 255 {
+			return fmt.Sprintf("int64(0x%x)", u)
+		}
+		return fmt.Sprintf("int64(%d)", imm)
 	case "", ir.TypInt:
 		if imm < 0 {
 			return fmt.Sprintf("%d", imm)
@@ -4004,6 +4084,33 @@ func preferHexU(u uint64) bool {
 		return false
 	}
 	return true
+}
+
+func formatInitCSV(csv string, elem ir.TypeName) string {
+	parts := strings.Split(csv, ",")
+	var out []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if strings.HasPrefix(p, "0x") || strings.HasPrefix(p, "0X") {
+			if u, err := strconv.ParseUint(p[2:], 16, 64); err == nil {
+				if u > 9 {
+					out = append(out, fmt.Sprintf("0x%x", u))
+				} else {
+					out = append(out, fmt.Sprintf("%d", u))
+				}
+				continue
+			}
+		}
+		if d, err := strconv.ParseInt(p, 10, 64); err == nil {
+			out = append(out, fmt.Sprintf("%d", d))
+			continue
+		}
+		out = append(out, p)
+	}
+	return strings.Join(out, ", ")
 }
 
 // doWhileOnce: cond is compile-time false after optional const prep (while(0)).
@@ -4302,12 +4409,18 @@ func goType(t ir.TypeName) string {
 		return "int8"
 	case ir.TypInt16:
 		return "int16"
+	case ir.TypInt32:
+		return "int32"
 	case ir.TypUint32:
 		return "uint32"
 	case ir.TypUint64:
 		return "uint64"
 	case ir.TypInt64:
 		return "int64"
+	case ir.TypFloat32:
+		return "float32"
+	case ir.TypFloat64:
+		return "float64"
 	case ir.TypBool:
 		return "bool"
 	case ir.TypVoid:

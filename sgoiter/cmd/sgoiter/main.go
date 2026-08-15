@@ -18,6 +18,8 @@ func main() {
 	fs := flag.NewFlagSet("sgoiter", flag.ExitOnError)
 	in := fs.String("in", "", "fichier .c subset v0 ou .ir.json")
 	out := fs.String("out", "", "sortie .go (emit go127)")
+	splitDir := fs.String("split-dir", "", "répertoire de sortie modulaire (découpe par domaine)")
+	pkgFlag := fs.String("pkg", "", "nom du package Go (défaut: nom du module C ou 'generated')")
 	irOut := fs.String("ir-out", "", "optionnel : écrire IR JSON")
 	opt := fs.Bool("opt", true, "appliquer règles IR")
 	mode := fs.String("mode", "safe", "emit mode: safe|kernel (kernel=unsafe LE word paths)")
@@ -27,8 +29,8 @@ func main() {
 	exclude := fs.String("exclude", "", "symboles ou structures à exclure de l'émission, séparés par des virgules")
 	_ = fs.Parse(os.Args[1:])
 
-	if *in == "" || *out == "" {
-		fmt.Fprintln(os.Stderr, "usage: sgoiter -in file.c|.ir.json -out file.go [-mode safe|kernel] [-ir-out m.ir.json] [-opt=true]")
+	if *in == "" || (*out == "" && *splitDir == "") {
+		fmt.Fprintln(os.Stderr, "usage: sgoiter -in file.c|.ir.json (-out file.go | -split-dir dir/) [-mode safe|kernel] [-ir-out m.ir.json] [-opt=true]")
 		os.Exit(2)
 	}
 	emMode := emit.ModeSafe
@@ -42,6 +44,38 @@ func main() {
 		os.Exit(2)
 	}
 
+	if filepath.Ext(*in) == ".go" {
+		srcBytes, err := os.ReadFile(*in)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		pkgName := *pkgFlag
+		if pkgName == "" {
+			pkgName = "generated"
+		}
+		if *splitDir != "" {
+			if err := os.MkdirAll(*splitDir, 0o755); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			domainFiles, err := emit.SplitGoSource(string(srcBytes), pkgName)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "sgoiter split error: %v\n", err)
+				os.Exit(1)
+			}
+			for fname, fcontent := range domainFiles {
+				destPath := filepath.Join(*splitDir, fname)
+				if err := os.WriteFile(destPath, []byte(fcontent), 0o644); err != nil {
+					fmt.Fprintf(os.Stderr, "sgoiter write %s error: %v\n", destPath, err)
+					os.Exit(1)
+				}
+				fmt.Printf("sgoiter split: %s (%d L)\n", destPath, len(strings.Split(fcontent, "\n")))
+			}
+		}
+		return
+	}
+
 	var m *ir.Module
 	var err error
 	switch filepath.Ext(*in) {
@@ -53,6 +87,9 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	if *pkgFlag != "" {
+		m.Name = *pkgFlag
 	}
 
 	if *opt {
@@ -111,9 +148,35 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if err := os.WriteFile(*out, []byte(src), 0o644); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	if *out != "" {
+		if err := os.WriteFile(*out, []byte(src), 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Printf("sgoiter: %s → %s\n", *in, *out)
 	}
-	fmt.Printf("sgoiter: %s → %s\n", *in, *out)
+
+	if *splitDir != "" {
+		if err := os.MkdirAll(*splitDir, 0o755); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		pkgName := m.Name
+		if pkgName == "" {
+			pkgName = "generated"
+		}
+		domainFiles, err := emit.SplitGoSource(src, pkgName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sgoiter split error: %v\n", err)
+			os.Exit(1)
+		}
+		for fname, fcontent := range domainFiles {
+			destPath := filepath.Join(*splitDir, fname)
+			if err := os.WriteFile(destPath, []byte(fcontent), 0o644); err != nil {
+				fmt.Fprintf(os.Stderr, "sgoiter write %s error: %v\n", destPath, err)
+				os.Exit(1)
+			}
+			fmt.Printf("sgoiter split: %s (%d L)\n", destPath, len(strings.Split(fcontent, "\n")))
+		}
+	}
 }

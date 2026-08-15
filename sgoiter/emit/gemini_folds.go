@@ -223,21 +223,19 @@ func matchCrcBitStep(lines []string, i int) (int, string) {
 	return n, repl
 }
 
-// foldManualRotHelpers rewrites tweetnacl-style L32/R helpers to bits.RotateLeft*.
 var (
-	reL32Def = regexp.MustCompile(`(?s)\nfunc L32\(x uint64, c int\) uint64 \{[^}]*\}\n*`)
+	reL32Def  = regexp.MustCompile(`(?s)(?:^|\n)func L32\(x (?:uint32|uint64), c int\) (?:uint32|uint64) \{\s*return [^}]*(?:<<|>>|\|)[^}]*\}\n*`)
 	reL32Call = regexp.MustCompile(`\bL32\(([^,]+),\s*([^)]+)\)`)
-	reRDef = regexp.MustCompile(`(?s)\nfunc R\(x uint64, c int\) uint64 \{[^}]*\}\n*`)
-	reRCall = regexp.MustCompile(`\bR\(([^,]+),\s*([^)]+)\)`)
+	reRDef    = regexp.MustCompile(`(?s)(?:^|\n)func R\(x (?:uint32|uint64), c int\) (?:uint32|uint64) \{\s*return [^}]*(?:<<|>>|\||RotateLeft)[^}]*\}\n*`)
+	reRCall   = regexp.MustCompile(`\bR\(([^,]+),\s*([^)]+)\)`)
 )
 
 func foldManualRotHelpers(block string) string {
-	// Drop defs FIRST — \bL32( also matches "func L32(".
-	if strings.Contains(block, "func L32(") {
+	if reL32Def.MatchString(block) {
 		block = reL32Def.ReplaceAllString(block, "\n")
-		block = reL32Call.ReplaceAllString(block, `uint64(bits.RotateLeft32(uint32($1), $2))`)
+		block = reL32Call.ReplaceAllString(block, `bits.RotateLeft32(uint32($1), $2)`)
 	}
-	if strings.Contains(block, "func R(") {
+	if reRDef.MatchString(block) {
 		block = reRDef.ReplaceAllString(block, "\n")
 		block = reRCall.ReplaceAllString(block, `bits.RotateLeft64($1, 64-($2))`)
 	}

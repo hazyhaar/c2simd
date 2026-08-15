@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Post-process sgoiter monocypher emit before package sync / ci diff.
+"""[DEPRECATED / OBSOLÈTE] Post-process sgoiter monocypher emit.
 
-Hand overrides live in monocypher_sgoiter/hand_*.go (and ge_*/tables).
-This strips broken or duplicate symbols from the generated file.
+La chaîne canonique d'émission sgoiter intègre désormais nativement toutes les passes
+d'idiomatisation (-exclude unifié, archArrayNotSlice, archBuiltinMinMax, etc.).
+Ce script n'est conservé que pour compatibilité d'outillage historique.
 """
 from __future__ import annotations
 
@@ -14,13 +15,13 @@ from pathlib import Path
 def postprocess(t: str) -> str:
     t = t.replace("var base_point = [1]byte{9}", "var base_point = [32]byte{9}")
     t = re.sub(
-        r"var zero = make\(\[\]byte, 128\)",
-        "var zero_arr [128]byte\nvar zero = zero_arr[:]",
+        r"var (zero|key_block|crypto_blake2b_keyed_init_key_block) = make\(\[\]byte, 128\)",
+        r"var \1_arr [128]byte\nvar \1 = \1_arr[:]",
         t,
     )
     t = re.sub(
-        r"var crypto_x25519_public_key_base_point = \[\]byte\{9\}",
-        "var crypto_x25519_public_key_base_point = func() []byte { var b [32]byte; b[0]=9; return b[:] }()",
+        r"var crypto_x25519_public_key_base_point = (?:\[\]byte\{9\}|func\(\) \[\]byte \{.*?\(\))",
+        "var crypto_x25519_public_key_base_point_arr = [32]byte{9}\nvar crypto_x25519_public_key_base_point = crypto_x25519_public_key_base_point_arr[:]",
         t,
     )
 
