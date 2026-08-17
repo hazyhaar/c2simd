@@ -1,6 +1,6 @@
-# First-pass sgoiter — libs HPM55 extra (2026-08-11)
+# First-pass sgoiter — bibliothèques C additionnelles (2026-08-11)
 
-Parent HPM55 : `ccgo-pkg` (roster **16** = 12 tribench + 4 extra — [`../ccgo_pkg/ROSTER.md`](../ccgo_pkg/ROSTER.md)).  
+Roster : **16** (12 tribench + 4 extra — [`../ccgo_pkg/ROSTER.md`](../ccgo_pkg/ROSTER.md)).  
 Sous-projets **extra** (13–16) : `sgoiter-stb-image`, `sgoiter-cjson`, `sgoiter-yyjson`, `sgoiter-utf8proc`.
 
 ## Layout sources
