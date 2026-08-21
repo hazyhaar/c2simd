@@ -85,15 +85,7 @@ Détail CUE : `spec/findings/F-20260810-avoid-patterns-adversarial.cue`, `F-2026
 
 ---
 
-## 6. Projets Système & Embarqué Cibles en Pure Go (`CGO_ENABLED=0`)
-
-Catalogue de référence des 10 projets système et embarqué en Pure Go sans CGO pour l'évaluation et la contribution de bancs de tests reproductibles :
-* Document principal : [`spec/projets_pure_go_cgo0.md`](file:///devhoros/c2simd/spec/projets_pure_go_cgo0.md)
-* Lien local module : [`PROJETS_PURE_GO.md`](file:///devhoros/c2simd/PROJETS_PURE_GO.md)
-
----
-
-## 7. Contributeurs & Équipe de Développement
+## 6. Contributeurs & Équipe de Développement
 
 Le projet `c2simd` et l'ensemble de ses sous-modules (`sgoiter`, `c2painter`, `c2display`, `c2fynedriver`, `c2fyneterm`, `c2vte`) sont développés et maintenus par :
 
@@ -101,5 +93,6 @@ Le projet `c2simd` et l'ensemble de ses sous-modules (`sgoiter`, `c2painter`, `c
 - **Gemini** (Google DeepMind) — Audits contradictoires, recherche de code, preuves de parité et modélisation formelle.
 - **Grok** (xAI) — Robustesse système, fuzzing intensif, résistance aux CVEs et analyse protocolaire.
 - **Claude** (Anthropic) — Passes du transpileur `sgoiter`, pile souveraine Fyne55, protocoles X11/Wayland et schémas CUE ARCHTIME.
+
 
 

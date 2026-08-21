@@ -1,1 +1,0 @@
-spec/projets_pure_go_cgo0.md
