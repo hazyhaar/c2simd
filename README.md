@@ -91,3 +91,15 @@ Catalogue de référence des 10 projets système et embarqué en Pure Go sans CG
 * Document principal : [`spec/projets_pure_go_cgo0.md`](file:///devhoros/c2simd/spec/projets_pure_go_cgo0.md)
 * Lien local module : [`PROJETS_PURE_GO.md`](file:///devhoros/c2simd/PROJETS_PURE_GO.md)
 
+---
+
+## 7. Contributeurs & Équipe de Développement
+
+Le projet `c2simd` et l'ensemble de ses sous-modules (`sgoiter`, `c2painter`, `c2display`, `c2fynedriver`, `c2fyneterm`, `c2vte`) sont développés et maintenus par :
+
+- **Hazyhaar** ([@hazyhaar](https://github.com/hazyhaar)) — Conception architecturale, doctrine d'ingénierie et gouvernance du projet.
+- **Gemini** (Google DeepMind) — Audits contradictoires, recherche de code, preuves de parité et modélisation formelle.
+- **Grok** (xAI) — Robustesse système, fuzzing intensif, résistance aux CVEs et analyse protocolaire.
+- **Claude** (Anthropic) — Passes du transpileur `sgoiter`, pile souveraine Fyne55, protocoles X11/Wayland et schémas CUE ARCHTIME.
+
+
