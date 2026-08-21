@@ -75,9 +75,11 @@ func classifyDecl(decl ast.Decl) string {
 			return DomainGE
 		case strings.HasPrefix(low, "crypto_x25519") || strings.HasPrefix(low, "scalarmult") ||
 			strings.HasPrefix(low, "curve_to_") || strings.HasPrefix(low, "add_xl") ||
-			strings.HasPrefix(low, "scalar_bit") || strings.HasPrefix(low, "multiply") || strings.HasPrefix(low, "redc"):
+			strings.HasPrefix(low, "scalar_bit") || strings.HasPrefix(low, "multiply") || strings.HasPrefix(low, "redc") ||
+			strings.HasPrefix(low, "crypto_elligator") || strings.HasPrefix(low, "elligator_"):
 			return DomainX25519
-		case strings.HasPrefix(low, "crypto_eddsa"):
+		case strings.HasPrefix(low, "crypto_eddsa") || strings.HasPrefix(low, "slide_") ||
+			strings.HasPrefix(low, "lookup_add") || strings.HasPrefix(low, "select_lop"):
 			return DomainEdDSA
 		case strings.HasPrefix(low, "crypto_verify") || strings.HasPrefix(low, "crypto_wipe") ||
 			strings.HasPrefix(low, "gap") || strings.HasPrefix(low, "load") || strings.HasPrefix(low, "store") ||

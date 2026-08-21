@@ -989,3 +989,25 @@ func astEliminateDeadCodeAfterReturn(body string) string {
 	})
 }
 
+// astFoldDoubleSlice supprime le re-slicing redondant `v[A:][:]` -> `v[A:]` et `v[A:B][:]` -> `v[A:B]`.
+func astFoldDoubleSlice(body string) string {
+	return astRewriteBody(body, func(src string, f *ast.File, fset *token.FileSet, add func(ast.Node, string)) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			sl, ok := n.(*ast.SliceExpr)
+			if !ok {
+				return true
+			}
+			if sl.Low != nil || sl.High != nil || sl.Slice3 {
+				return true
+			}
+			inner, ok := sl.X.(*ast.SliceExpr)
+			if !ok {
+				return true
+			}
+			add(sl, nodeSrc(src, fset, inner))
+			return false
+		})
+	})
+}
+
+

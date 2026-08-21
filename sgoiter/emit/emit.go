@@ -1413,6 +1413,7 @@ stripped = astUnrollConstTripLoops(stripped)
 	stripped = regexp.MustCompile(`\(\s*([a-zA-Z0-9_\.]+)\s*\+\s*0\s*\)`).ReplaceAllString(stripped, "$1")
 	stripped = regexp.MustCompile(`&([A-Za-z0-9_\.]+\s*\[[^\]]+\])\.([A-Za-z0-9_]+)`).ReplaceAllString(stripped, "$1.$2")
 	stripped = astFixStringSliceCallArgs(stripped)
+	stripped = astFoldDoubleSlice(stripped)
 	// Suppression du code mort après les retours inconditionnels (F4).
 	stripped = astEliminateDeadCodeAfterReturn(stripped)
 	// Post-unroll and copy/clear loop transforms may leave dead idx locals.
