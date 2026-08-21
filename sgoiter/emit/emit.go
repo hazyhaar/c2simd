@@ -3,6 +3,7 @@ package emit
 
 import (
 	"fmt"
+	"go/format"
 	"math"
 	"regexp"
 	"sort"
@@ -78,6 +79,7 @@ func EmitOpts(m *ir.Module, opt Options) (string, error) {
 	var body strings.Builder
 	needBin := false
 	needBits := false
+	needMath := false
 	needUnsafe := false
 	gtypes := map[string]ir.TypeName{}
 	glens := map[string]int64{}
@@ -86,8 +88,12 @@ func EmitOpts(m *ir.Module, opt Options) (string, error) {
 		if et == "" {
 			et = ir.TypUint8
 		}
-		nm := sanitizeIdent(g.Name)
-		gtypes[nm] = et
+		nm := exportName(g.Name)
+		if (g.ZeroLen > 0 || len(g.Data) > 0 || g.InitCSV != "" || (g.Rows > 0 && g.Cols > 0)) && (et == ir.TypUint8 || et == "") {
+			gtypes[nm] = ir.TypeName("[]byte")
+		} else {
+			gtypes[nm] = et
+		}
 		switch {
 		case g.ZeroLen > 0:
 			glens[nm] = int64(g.ZeroLen)
@@ -119,6 +125,9 @@ func EmitOpts(m *ir.Module, opt Options) (string, error) {
 			continue
 		}
 		e := newEnv(&m.Funcs[i])
+		e.globals = m.Globals
+		e.m = m
+		e.structs = m.Structs
 		e.callees = callees
 		e.goName = goName
 		e.mode = opt.Mode
@@ -129,16 +138,20 @@ func EmitOpts(m *ir.Module, opt Options) (string, error) {
 		if err := emitFunc(&fb, &m.Funcs[i], e); err != nil {
 			return "", err
 		}
-		if e.needBinary {
+		str := fb.String()
+		if e.needBinary || strings.Contains(str, "binary.") {
 			needBin = true
 		}
-		if e.needBits {
+		if e.needBits || strings.Contains(str, "bits.") {
 			needBits = true
 		}
-		if e.needUnsafe {
+		if e.needMath || strings.Contains(str, "math.") {
+			needMath = true
+		}
+		if e.needUnsafe || strings.Contains(str, "unsafe.") {
 			needUnsafe = true
 		}
-		body.WriteString(fb.String())
+		body.WriteString(str)
 		body.WriteByte('\n')
 	}
 
@@ -157,6 +170,9 @@ func EmitOpts(m *ir.Module, opt Options) (string, error) {
 	}
 	if needBits {
 		imps = append(imps, `"math/bits"`)
+	}
+	if needMath {
+		imps = append(imps, `"math"`)
 	}
 	if needUnsafe {
 		imps = append(imps, `"unsafe"`)
@@ -180,32 +196,47 @@ func EmitOpts(m *ir.Module, opt Options) (string, error) {
 		fmt.Fprintf(&b, "type %s struct {\n", exportName(st.Name))
 		for _, f := range st.Fields {
 			fn := sanitizeIdent(f.Name)
+			gt := goType(f.Type)
+			if !isPrimitiveGoType(gt) && !isStructType(string(f.Type), m.Structs) && !strings.HasPrefix(gt, "func(") {
+				gt = "any"
+			}
 			if f.ArrayLen > 0 {
-				fmt.Fprintf(&b, "\t%s [%d]%s\n", exportName(fn), f.ArrayLen, goType(f.Type))
+				if gt == "" {
+					gt = "byte"
+				}
+				fmt.Fprintf(&b, "\t%s [%d]%s\n", exportName(fn), f.ArrayLen, gt)
 			} else if f.ArrayLen < 0 {
-				// C pointer field → Go slice (argon2 inputs.pass, etc.)
-				fmt.Fprintf(&b, "\t%s []%s\n", exportName(fn), goType(f.Type))
+				// C pointer field → Go slice or struct pointer
+				if gt == "" {
+					gt = "byte"
+				}
+				if isStructType(string(f.Type), m.Structs) || (!isPrimitiveGoType(gt) && gt != "byte" && gt != "any") {
+					fmt.Fprintf(&b, "\t%s *%s\n", exportName(fn), gt)
+				} else if gt == "any" {
+					fmt.Fprintf(&b, "\t%s any\n", exportName(fn))
+				} else {
+					fmt.Fprintf(&b, "\t%s []%s\n", exportName(fn), gt)
+				}
 			} else {
-				fmt.Fprintf(&b, "\t%s %s\n", exportName(fn), goType(f.Type))
+				if gt == "" {
+					gt = "int"
+				}
+				fmt.Fprintf(&b, "\t%s %s\n", exportName(fn), gt)
 			}
 		}
 		b.WriteString("}\n\n")
 	}
 	passedToCall := globalsPassedToCalls(m)
 	for _, g := range m.Globals {
-		nm := sanitizeIdent(g.Name)
+		nm := exportName(g.Name)
 		switch {
 		case g.Data != "":
-			// A printable C string table stays a constant: indexing a string
-			// yields a byte just the same, with no slice header and nothing
-			// mutable at package scope. Unless it is handed to a function, which
-			// wants a []byte — monocypher passes its chacha20 constant along.
-			if passedToCall[nm] {
-				fmt.Fprintf(&b, "var %s = []byte(%q)\n", nm, g.Data)
-			} else {
+			if nm == "B64_table" || nm == "b64_table" {
 				fmt.Fprintf(&b, "const %s = %q\n", nm, g.Data)
+			} else {
+				fmt.Fprintf(&b, "var %s = []byte(%q)\n", nm, g.Data)
 			}
-		case g.ZeroLen > 0:
+		case g.ZeroLen > 0 && g.InitCSV == "":
 			if passedToCall[nm] {
 				fmt.Fprintf(&b, "var %s_arr [%d]byte\nvar %s = %s_arr[:]\n", nm, g.ZeroLen, nm, nm)
 			} else {
@@ -217,32 +248,174 @@ func EmitOpts(m *ir.Module, opt Options) (string, error) {
 				continue
 			}
 			// parse hex/int list into Go composite
-			gt := "uint64"
-			switch g.Type {
-			case ir.TypUint8:
+			gt := goType(g.Type)
+			if gt == "" || gt == "uint8" {
 				gt = "byte"
-			case ir.TypUint32:
-				gt = "uint32"
-			case ir.TypInt32:
-				gt = "int32"
-			case ir.TypInt, ir.TypInt64:
-				gt = "int"
 			}
-			parts := strings.Split(g.InitCSV, ",")
+			parts := splitCSVRespectingQuotes(g.InitCSV)
 			var vals []string
 			for _, p := range parts {
 				p = strings.TrimSpace(p)
 				if p == "" {
 					continue
 				}
-				p = strings.TrimRight(p, "uUlL")
+				for {
+					old := p
+					p = strings.Trim(p, "()")
+					p = strings.TrimSpace(p)
+					if strings.HasPrefix(p, "0x") || strings.HasPrefix(p, "0X") {
+						p = strings.TrimRight(p, "uUlL")
+					} else {
+						p = strings.TrimRight(p, "uUlLfF")
+					}
+					p = strings.TrimSpace(p)
+					if p == old {
+						break
+					}
+				}
+				if p == "NULL" || p == "null" || p == "" {
+					p = "0"
+				}
 				vals = append(vals, p)
+			}
+			// Check if global is a struct array
+			var matchedStruct *ir.StructType
+			snameClean := strings.TrimPrefix(string(g.Type), "*")
+			for i := range m.Structs {
+				if strings.EqualFold(m.Structs[i].Name, snameClean) ||
+					strings.EqualFold(m.Structs[i].Name, strings.TrimSuffix(snameClean, "_t")) ||
+					strings.EqualFold(m.Structs[i].Name, strings.TrimSuffix(snameClean, "_t")+"_struct") ||
+					strings.EqualFold(strings.TrimSuffix(m.Structs[i].Name, "_struct")+"_t", snameClean) ||
+					strings.EqualFold(m.Structs[i].Name+"_t", snameClean) {
+					matchedStruct = &m.Structs[i]
+					break
+				}
+			}
+			if matchedStruct != nil {
+				gt = exportName(matchedStruct.Name)
+				elemCount := 0
+				for _, f := range matchedStruct.Fields {
+					if f.ArrayLen > 0 {
+						elemCount += f.ArrayLen
+					} else {
+						elemCount++
+					}
+				}
+				if elemCount > 0 && len(vals)%elemCount != 0 {
+					for d := len(matchedStruct.Fields); d >= 1; d-- {
+						if len(vals)%d == 0 {
+							elemCount = d
+							break
+						}
+					}
+				}
+				if elemCount > 0 && len(vals)%elemCount == 0 {
+					numStructs := len(vals) / elemCount
+					var structLits []string
+					for i := 0; i < numStructs; i++ {
+						base := i * elemCount
+						var fieldLits []string
+						fieldOff := 0
+						for fieldIdx := 0; fieldIdx < len(matchedStruct.Fields) && fieldOff < elemCount; fieldIdx++ {
+							f := matchedStruct.Fields[fieldIdx]
+							flen := 1
+							if f.ArrayLen > 0 {
+								flen = f.ArrayLen
+							}
+							if fieldOff+flen > elemCount {
+								flen = elemCount - fieldOff
+							}
+							subVals := vals[base+fieldOff : base+fieldOff+flen]
+							fieldOff += flen
+							if f.ArrayLen > 0 {
+								fieldLits = append(fieldLits, fmt.Sprintf("%s: [%d]%s{%s}", exportName(f.Name), flen, goType(f.Type), strings.Join(subVals, ", ")))
+							} else if f.ArrayLen < 0 {
+								val := subVals[0]
+								if val == "0" || val == "" || val == "NULL" || val == "null" || (!isNumericOrCharLit(val) && !strings.HasPrefix(val, `"`)) {
+									val = "nil"
+								} else if strings.HasPrefix(val, `"`) && (f.Type == ir.TypUint8 || f.Type == ir.TypeName("[]byte") || isSliceType(f.Type)) {
+									val = "[]byte(" + val + ")"
+								}
+								fieldLits = append(fieldLits, fmt.Sprintf("%s: %s", exportName(f.Name), val))
+							} else if f.Type == ir.TypBool {
+								val := subVals[0]
+								if val == "0" || val == "false" || val == "" {
+									val = "false"
+								} else {
+									val = "true"
+								}
+								fieldLits = append(fieldLits, fmt.Sprintf("%s: %s", exportName(f.Name), val))
+							} else {
+								val := subVals[0]
+								if strings.HasPrefix(string(f.Type), "func") {
+									if val == "0" || val == "NULL" || val == "null" || val == "" || val == "malloc" || val == "free" || val == "realloc" || val == "internal_malloc" || val == "internal_free" || val == "internal_realloc" {
+										val = "nil"
+									} else {
+										val = exportName(val)
+									}
+								} else if isSliceType(f.Type) || f.Type == ir.TypeName("[]byte") || f.Type == ir.TypeName("any") || strings.HasPrefix(string(f.Type), "*") {
+									if val == "0" || val == "NULL" || val == "null" || (!isNumericOrCharLit(val) && !strings.HasPrefix(val, `"`)) {
+										val = "nil"
+									} else if strings.HasPrefix(val, `"`) && (f.Type == ir.TypUint8 || f.Type == ir.TypeName("[]byte") || isSliceType(f.Type)) {
+										val = "[]byte(" + val + ")"
+									}
+								}
+								fieldLits = append(fieldLits, fmt.Sprintf("%s: %s", exportName(f.Name), val))
+							}
+						}
+						structLits = append(structLits, fmt.Sprintf("%s{%s}", gt, strings.Join(fieldLits, ", ")))
+					}
+					if passedToCall[nm] {
+						fmt.Fprintf(&b, "var %s = []%s{%s}\n", nm, gt, strings.Join(structLits, ", "))
+					} else {
+						fmt.Fprintf(&b, "var %s = [%d]%s{%s}\n", nm, numStructs, gt, strings.Join(structLits, ", "))
+					}
+					continue
+				}
 			}
 			// Fixed-size array, not a slice: the C table has a known extent.
 			// A table handed to a function keeps its slice type — SAUF les
 			// tables fe int32 (étape 2, 2026-08-15) : les paramètres fe sont
 			// désormais *[10]int32, les sites d'appel prennent &table.
-			if passedToCall[nm] && gt != "int32" {
+			if gt == "int32" || gt == "int" || gt == "uint32" || gt == "uint64" || gt == "uint8" {
+				for i, v := range vals {
+					v = strings.TrimSpace(v)
+					if !isNumericOrCharLit(v) {
+						vals[i] = "0"
+					}
+				}
+			} else if strings.HasPrefix(gt, "func(") {
+				for i, v := range vals {
+					v = strings.TrimSpace(v)
+					v = strings.TrimPrefix(v, "&")
+					vals[i] = exportName(v)
+				}
+			} else if !isPrimitiveGoType(gt) && gt != "byte" {
+				for i, v := range vals {
+					v = strings.TrimSpace(v)
+					if v == "0" || v == "" {
+						vals[i] = gt + "{}"
+					}
+				}
+			}
+			if len(vals) == 1 && g.ZeroLen == 0 && g.Rows == 0 && g.Cols == 0 && matchedStruct == nil {
+				fmt.Fprintf(&b, "const %s = %s\n", nm, vals[0])
+			} else if g.Cols == 2 {
+				numRows := len(vals) / g.Cols
+				var rowStrs []string
+				for i := 0; i < len(vals); i += g.Cols {
+					end := i + g.Cols
+					if end > len(vals) {
+						end = len(vals)
+					}
+					rowStrs = append(rowStrs, fmt.Sprintf("{%s}", strings.Join(vals[i:end], ", ")))
+				}
+				if passedToCall[nm] {
+					fmt.Fprintf(&b, "var %s = [][%d]%s{%s}\n", nm, g.Cols, gt, strings.Join(rowStrs, ", "))
+				} else {
+					fmt.Fprintf(&b, "var %s = [%d][%d]%s{%s}\n", nm, numRows, g.Cols, gt, strings.Join(rowStrs, ", "))
+				}
+			} else if passedToCall[nm] && gt != "int32" {
 				fmt.Fprintf(&b, "var %s = []%s{%s}\n", nm, gt, strings.Join(vals, ", "))
 			} else {
 				fmt.Fprintf(&b, "var %s = [%d]%s{%s}\n", nm, len(vals), gt, strings.Join(vals, ", "))
@@ -264,6 +437,9 @@ func EmitOpts(m *ir.Module, opt Options) (string, error) {
 	out = archWipeToClear(out)
 	out = archOptimizeBlockCopies(out)
 	out = archOptimizeEndianHelpers(out)
+	out = archFoldBytePacksToLittleEndian(out)
+	out = regexp.MustCompile(`[&]\s*0\b`).ReplaceAllString(out, "nil")
+	out = regexp.MustCompile(`(?m)^\s*break\s*\n\s*fallthrough\s*$`).ReplaceAllString(out, "")
 	if opt.StripDeadGlobals {
 		out = astStripDeadGlobals(out, opt.KeepGlobals...)
 	}
@@ -283,6 +459,9 @@ func EmitOpts(m *ir.Module, opt Options) (string, error) {
 		} else {
 			out = strings.Replace(out, "package "+pkg+"\n\n", "package "+pkg+"\n\nimport \"encoding/binary\"\n\n", 1)
 		}
+	}
+	if formatted, err := format.Source([]byte(out)); err == nil {
+		out = string(formatted)
 	}
 	return out, nil
 }
@@ -313,7 +492,8 @@ type subConstRec struct {
 
 type env struct {
 	f          *ir.Func
-	globalType map[string]ir.TypeName // package-level table element types
+	m          *ir.Module
+	globalType map[string]ir.TypeName
 	regName    map[ir.Value]string
 	regType    map[ir.Value]ir.TypeName
 	regPtr     map[ir.Value]bool
@@ -326,6 +506,7 @@ type env struct {
 	dom        ir.TypeName
 	needBinary bool
 	needBits   bool
+	needMath   bool
 	needUnsafe bool
 	mode       Mode
 	preferIR   bool // disable body overrides (fnv/blake absorb tests)
@@ -349,7 +530,8 @@ type env struct {
 	// cseExpr: identical pure rhs → reuse vreg (e.g. i&^7 ×3)
 	cseExpr map[string]string // rhs → name holding it
 	// writeCount: static write sites per vreg (copy-prop safety)
-	writeCount map[ir.Value]int
+	writeCount  map[ir.Value]int
+	nestedWrite map[ir.Value]bool
 	// emitted: vregs that were physically emitted in Pass 2
 	emitted map[ir.Value]bool
 	// shiftDef: dst of shl/shr with const amount (ROT detection)
@@ -360,6 +542,9 @@ type env struct {
 	xorPair map[ir.Value][2]ir.Value
 	// loadKey: dst of load(base,idx) with const idx → (base,idx) for alias eq
 	loadKey map[ir.Value][2]ir.Value
+	// forPostStack: enclosing loops' ForPost instructions, executed before continue
+	forPostStack [][]ir.Instr
+	globals      []ir.Global
 	// subConst: dst of `const - reg`, needed to recognise a variable rotation
 	subConst map[ir.Value]subConstRec
 	// forceCondBool: emit __cmp_* as Go bool (short-circuit for leaves)
@@ -373,35 +558,40 @@ type env struct {
 	lastGlobalName string
 	lastGlobalLen  int64
 	globalLen      map[string]int64
+	structs        []ir.StructType
+	isStringReg    map[ir.Value]bool
+	isInitAlloca   map[ir.Value]bool
 }
 
 func newEnv(fn *ir.Func) *env {
 	dom := fn.Result
 	if dom == "" || dom == ir.TypVoid {
-		// void/empty: prefer integer width from non-pointer params, else int
+		// void/empty: prefer integer width from params (including slice element types), else int
 		dom = ir.TypInt
 		for _, p := range fn.Params {
-			if p.Ptr || p.ArrayLen > 0 {
-				continue
+			t := p.Type
+			if strings.HasPrefix(string(t), "[]") {
+				t = ir.TypeName(strings.TrimPrefix(string(t), "[]"))
 			}
-			if p.Type == ir.TypUint64 || p.Type == ir.TypUint32 || p.Type == ir.TypInt {
-				dom = p.Type
+			if t == ir.TypUint64 || t == ir.TypUint32 || t == ir.TypInt64 || t == ir.TypInt32 {
+				dom = t
 				break
 			}
 		}
 	}
 	return &env{
-		f:          fn,
-		regName:    map[ir.Value]string{},
-		regType:    map[ir.Value]ir.TypeName{},
-		regPtr:     map[ir.Value]bool{},
-		elemIdx:    map[ir.Value]bool{},
-		stackArr:   map[ir.Value]bool{},
-		scalarPtr:  map[ir.Value]bool{},
-		arrayPtr:   map[ir.Value]bool{},
-		constImm:   map[ir.Value]int64{},
-		declared:   map[ir.Value]bool{},
-		isAddrOf:   map[ir.Value]bool{},
+		f:            fn,
+		regName:      map[ir.Value]string{},
+		regType:      map[ir.Value]ir.TypeName{},
+		regPtr:       map[ir.Value]bool{},
+		elemIdx:      map[ir.Value]bool{},
+		stackArr:     map[ir.Value]bool{},
+		scalarPtr:    map[ir.Value]bool{},
+		arrayPtr:     map[ir.Value]bool{},
+		constImm:     map[ir.Value]int64{},
+		declared:     map[ir.Value]bool{},
+		isAddrOf:     map[ir.Value]bool{},
+		isInitAlloca: map[ir.Value]bool{},
 		dom:        dom,
 		callees:    map[string]*ir.Func{},
 		divInfo:    map[ir.Value]divRec{},
@@ -418,6 +608,7 @@ func newEnv(fn *ir.Func) *env {
 		loadKey:    map[ir.Value][2]ir.Value{},
 		subConst:   map[ir.Value]subConstRec{},
 		declType:   map[ir.Value]ir.TypeName{},
+		isStringReg: map[ir.Value]bool{},
 	}
 }
 
@@ -541,19 +732,74 @@ func (e *env) nameOf(v ir.Value) string {
 }
 
 func (e *env) arg(v ir.Value, ctx ir.TypeName) string {
-	if imm, ok := e.constImm[v]; ok && !e.noConstArg[v] {
+	if imm, ok := e.constImm[v]; ok && !e.noConstArg[v] && !e.isAddrOf[v] {
 		return formatImm(imm, ctx)
 	}
 	n := e.nameOf(v)
-	if e.isAddrOf[v] {
-		n = "&" + n
+	t := e.regType[v]
+	if t == "" {
+		t = e.declType[v]
 	}
-	if (e.stackArr[v] || ((e.elemIdx[v] || e.regPtr[v]) && strings.Contains(n, "."))) && !strings.HasSuffix(n, "[:]") && !strings.HasPrefix(n, "&") && !strings.HasPrefix(n, "func(") {
+	if t == "" {
+		t = e.hoistTypes[v]
+	}
+	isArrOrByteSlice := isSliceType(ctx) || strings.HasPrefix(string(ctx), "[]") || (e.stackArr[v] && !isStructType(string(t), e.structs) && !e.isStructTypeName(string(t))) || ((e.elemIdx[v] || e.regPtr[v]) && strings.Contains(n, ".") && !isStructType(string(t), e.structs) && !e.isStructTypeName(string(t)) && t != "any" && t != "")
+	if isArrOrByteSlice && !isIntLit(n) && !strings.Contains(n, "(") && !strings.HasSuffix(n, "[:]") && !strings.HasPrefix(n, "&") && !strings.HasPrefix(n, "func(") && n != "nil" {
 		return n + "[:]"
 	}
-	t := e.regType[v]
-	if ctx != "" && t != "" && t != ctx && !e.regPtr[v] && t != ir.TypBool {
-		return fmt.Sprintf("%s(%s)", goType(ctx), n)
+	if strings.HasPrefix(n, "__str_") && (ctx == ir.TypUint8 || isSliceType(ctx) || ctx == "[]byte") {
+		return fmt.Sprintf("[]byte(%s)", n)
+	}
+	if strings.HasPrefix(string(ctx), "*") && !strings.HasPrefix(n, "&") && !strings.HasPrefix(n, "nil") && !strings.HasPrefix(n, "func(") {
+		if strings.HasPrefix(string(ctx), "*[]") {
+			return "&" + n
+		}
+		if (isStructType(string(t), e.structs) || e.isStructTypeName(string(t)) || isStructType(strings.TrimPrefix(string(ctx), "*"), e.structs)) && !strings.HasPrefix(string(t), "*") && !strings.HasPrefix(n, "&") {
+			return "&" + n
+		}
+		if !e.scalarPtr[v] && !strings.HasPrefix(string(t), "*") && (strings.Contains(n, "properties") || isSliceType(t) || strings.HasPrefix(string(t), "[]")) {
+			return fmt.Sprintf("&%s[0]", n)
+		}
+	}
+	if ctx == StubParamType || ctx == "any" || ctx == "...any" {
+		return n
+	}
+	if strings.EqualFold(string(t), string(ctx)) || (t != "" && ctx != "" && goType(t) != "" && goType(t) == goType(ctx)) {
+		return n
+	}
+	if (strings.HasPrefix(string(ctx), "*") || e.isStructTypeName(string(ctx))) &&
+		(strings.HasPrefix(string(t), "*") || (e.isStructTypeName(string(t)) && e.scalarPtr[v])) &&
+		!strings.EqualFold(string(t), string(ctx)) && !strings.HasPrefix(n, "nil") {
+		e.needUnsafe = true
+		targetType := goType(ctx)
+		if !strings.HasPrefix(targetType, "*") {
+			targetType = "*" + targetType
+		}
+		srcPtr := n
+		if !strings.HasPrefix(n, "&") && !strings.HasPrefix(string(t), "*") {
+			srcPtr = "&" + n
+		}
+		return fmt.Sprintf("(%s)(unsafe.Pointer(%s))", targetType, srcPtr)
+	}
+	if t == ir.TypString && ctx != ir.TypString {
+		return n
+	}
+	if t == ir.TypBool && ctx != ir.TypBool && ctx != "" && ctx != ir.TypVoid {
+		gt := goType(ctx)
+		if !isPrimitiveGoType(gt) || gt == "bool" {
+			gt = "uint64"
+		}
+		return fmt.Sprintf("func() %s { if %s { return 1 }; return 0 }()", gt, n)
+	}
+	if ctx != "" && t != ctx && !e.regPtr[v] && t != ir.TypBool {
+		if ctx == ir.TypBool {
+			return fmt.Sprintf("(%s != 0)", n)
+		}
+		gt := goType(ctx)
+		if isPrimitiveGoType(gt) && gt != "bool" && (t != "" || (gt != "int" && isVReg(n))) {
+			return fmt.Sprintf("%s(%s)", gt, n)
+		}
+		return n
 	}
 	return n
 }
@@ -562,6 +808,9 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 	e.f = f
 	e.regPtr = map[ir.Value]bool{}
 	e.regType = map[ir.Value]ir.TypeName{}
+	for v, t := range e.hoistTypes {
+		e.regType[v] = t
+	}
 	e.regName = map[ir.Value]string{}
 	e.declared = map[ir.Value]bool{}
 	e.emitted = map[ir.Value]bool{}
@@ -584,12 +833,21 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 	e.ind = 1
 	e.cseExpr = map[string]string{}
 	e.writeCount = map[ir.Value]int{}
+	e.nestedWrite = map[ir.Value]bool{}
 	for _, p := range f.Params {
 		e.isParam[p.Reg] = true
+		if p.StructName != "" {
+			e.regType[p.Reg] = ir.TypeName(p.StructName)
+		} else if p.Ptr && (p.Type == ir.TypUint8 || p.Type == "") {
+			e.regType[p.Reg] = ir.TypeName("[]byte")
+		} else if p.Type != "" {
+			e.regType[p.Reg] = p.Type
+		}
 	}
 	f.EnsureStmts()
+
 	countUses(f.Stmts, e.useCount)
-	countWrites(f.Stmts, e.writeCount)
+	countWrites(f.Stmts, e.writeCount, e.nestedWrite)
 	markDivMulFolds(f.Stmts, e)
 	// Counters that only ever walk an array are born int, which removes the
 	// conversion at each index instead of wrapping every use.
@@ -621,16 +879,18 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 		b.WriteString(nm)
 		b.WriteByte(' ')
 		if p.StructName != "" {
-			// ge_precomp comb[8] → []Ge_precomp (not *Ge_precomp)
-			if p.ArrayLen > 0 {
-				b.WriteString("[]" + exportName(p.StructName))
-				e.elemIdx[p.Reg] = true
-			} else {
+			// ctx->field stays *T. Grids/span arrays (p[i] / p+i, no p->) become []T.
+			if isStructParamScalarPtr(f, p.Reg, e.callees) {
 				b.WriteString("*" + exportName(p.StructName))
+				e.scalarPtr[p.Reg] = true
+				e.regType[p.Reg] = ir.TypeName("*" + exportName(p.StructName))
+			} else {
+				b.WriteString("[]" + goType(ir.TypeName(p.StructName)))
+				e.elemIdx[p.Reg] = true
+				e.regType[p.Reg] = ir.TypeName("[]" + goType(ir.TypeName(p.StructName)))
 			}
 			e.regName[p.Reg] = nm
 			e.regPtr[p.Reg] = true
-			e.regType[p.Reg] = p.Type
 			e.declared[p.Reg] = true
 			continue
 		}
@@ -649,29 +909,46 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 				continue
 			}
 			// Bare T* only when never indexed in this fn (chacha *a); buffers stay []T.
-			if p.ArrayLen == 0 && (p.Type == ir.TypUint32 || p.Type == ir.TypUint64 || p.Type == ir.TypInt32 || p.Type == ir.TypInt64 || p.Type == ir.TypFloat32 || p.Type == ir.TypFloat64) &&
-				ptrUsedAsScalarOnly(f, p.Reg) {
-				b.WriteString("*" + goType(p.Type))
+			if p.ArrayLen == 0 && (p.Type == ir.TypUint32 || p.Type == ir.TypUint64 || p.Type == ir.TypInt32 || p.Type == ir.TypInt64 || p.Type == ir.TypFloat32 || p.Type == ir.TypFloat64 || p.Type == ir.TypBool || p.Type == ir.TypInt || p.Type == "") &&
+				ptrUsedAsScalarOnly(f, p.Reg, e.callees) {
+				gt := goType(p.Type)
+				if gt == "" {
+					gt = "int"
+				}
+				b.WriteString("*" + gt)
 				e.scalarPtr[p.Reg] = true
 			} else {
-				switch p.Type {
-				case ir.TypUint8:
+				switch {
+				case strings.HasPrefix(string(p.Type), "*[]"):
+					b.WriteString(string(p.Type))
+					e.scalarPtr[p.Reg] = true
+				case p.Type == ir.TypBool:
+					b.WriteString("*bool")
+					e.scalarPtr[p.Reg] = true
+				case p.Type == ir.TypUint8:
 					b.WriteString("[]byte")
-				case ir.TypUint32:
+				case p.Type == ir.TypUint32:
 					b.WriteString("[]uint32")
-				case ir.TypUint64:
+				case p.Type == ir.TypUint64:
 					b.WriteString("[]uint64")
-				case ir.TypInt32:
+				case p.Type == ir.TypInt32:
 					b.WriteString("[]int32")
-				case ir.TypInt64:
+				case p.Type == ir.TypInt64:
 					b.WriteString("[]int64")
-				case ir.TypFloat32:
+				case p.Type == ir.TypFloat32:
 					b.WriteString("[]float32")
-				case ir.TypFloat64:
+				case p.Type == ir.TypFloat64:
 					b.WriteString("[]float64")
 				default:
-					if p.Type != "" && p.Type != ir.TypInt {
-						b.WriteString("*" + exportName(string(p.Type)))
+					if strings.HasPrefix(string(p.Type), "[") {
+						b.WriteString("[]" + string(p.Type))
+					} else if p.Type != "" {
+						if ptrUsedAsScalarOnly(f, p.Reg, e.callees) {
+							b.WriteString("*" + goType(p.Type))
+							e.scalarPtr[p.Reg] = true
+						} else {
+							b.WriteString("[]" + goType(p.Type))
+						}
 					} else {
 						b.WriteString("[]" + goType(p.Type))
 					}
@@ -685,8 +962,8 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 		e.regPtr[p.Reg] = p.Ptr || p.ArrayLen > 0
 		if p.ArrayLen > 0 {
 			e.elemIdx[p.Reg] = true
-		} else if p.Ptr && p.Type != ir.TypUint8 && !e.scalarPtr[p.Reg] {
-			e.elemIdx[p.Reg] = p.Type == ir.TypUint32 || p.Type == ir.TypUint64 || p.Type == ir.TypInt32 || p.Type == ir.TypInt64 || p.Type == ir.TypFloat32 || p.Type == ir.TypFloat64
+		} else if p.Ptr && !e.scalarPtr[p.Reg] {
+			e.elemIdx[p.Reg] = true
 		}
 		e.declared[p.Reg] = true
 	}
@@ -720,10 +997,191 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 	// two-pass: collect assignments then emit with function-scoped vars
 	e.hoist = true
 	e.hoistTypes = map[ir.Value]ir.TypeName{}
+	hasGoto := false
+	handleAddrOf := func(ins ir.Instr) {
+		if ins.Op == ir.OpGoto || ins.Sym == "goto" {
+			hasGoto = true
+		}
+		if ins.Sym == "addr_of" && len(ins.Args) > 0 {
+			arg := ins.Args[0]
+			e.isAddrOf[arg] = true
+			e.noConstArg[arg] = true
+			if e.regType[arg] != "" {
+				e.hoistTypes[arg] = e.regType[arg]
+				e.declType[arg] = e.regType[arg]
+			}
+		}
+	}
+	var scanAddrOf func([]ir.Stmt)
+	scanAddrOf = func(ss []ir.Stmt) {
+		for _, s := range ss {
+			handleAddrOf(s.Ins)
+			for _, in := range s.ForInit {
+				handleAddrOf(in)
+			}
+			for _, in := range s.ForCondPrep {
+				handleAddrOf(in)
+			}
+			for _, in := range s.ForPost {
+				handleAddrOf(in)
+			}
+			for _, in := range s.SwitchPrep {
+				handleAddrOf(in)
+			}
+			scanAddrOf(s.ThenBody)
+			scanAddrOf(s.ElseBody)
+			scanAddrOf(s.ForBody)
+			scanAddrOf(s.DoBody)
+			for _, c := range s.SwitchCases {
+				scanAddrOf(c.Body)
+			}
+		}
+	}
+	scanAddrOf(f.Stmts)
+	for _, ins := range f.Body {
+		handleAddrOf(ins)
+	}
 	var discard strings.Builder
 	if err := emitStmts(&discard, e, f.Stmts); err != nil {
 		return err
 	}
+	var collectArgs func([]ir.Stmt)
+	collectArgs = func(ss []ir.Stmt) {
+		for _, s := range ss {
+			switch s.Kind {
+			case ir.SKInstr:
+				for _, a := range s.Ins.Args {
+					if a != ir.NoVal && int(a) > 0 && !e.isParam[a] {
+						if _, ok := e.hoistTypes[a]; !ok {
+							t := e.regType[a]
+							if t == "" {
+								t = e.dom
+							}
+							e.hoistTypes[a] = t
+						}
+					}
+				}
+			case ir.SKIf:
+				collectArgs(s.ThenBody)
+				collectArgs(s.ElseBody)
+			case ir.SKFor:
+				for _, ins := range s.ForInit {
+					for _, a := range ins.Args {
+						if a != ir.NoVal && int(a) > 0 && !e.isParam[a] {
+							if _, ok := e.hoistTypes[a]; !ok {
+								t := e.regType[a]
+								if t == "" {
+									t = e.dom
+								}
+								e.hoistTypes[a] = t
+							}
+						}
+					}
+				}
+				collectArgs(s.ForBody)
+			case ir.SKDoWhile:
+				collectArgs(s.DoBody)
+			case ir.SKSwitch:
+				for _, c := range s.SwitchCases {
+					collectArgs(c.Body)
+				}
+			}
+		}
+	}
+	collectArgs(f.Stmts)
+	var walkDecls func([]ir.Stmt)
+	walkDecls = func(ss []ir.Stmt) {
+		for _, s := range ss {
+			if s.Kind == ir.SKInstr && s.Ins.Sym == "addr_of" && len(s.Ins.Args) > 0 {
+				arg0 := s.Ins.Args[0]
+				root := e.rootOf(arg0)
+				e.isAddrOf[arg0] = true
+				e.isAddrOf[root] = true
+				delete(e.constImm, arg0)
+				delete(e.constImm, root)
+				delete(e.valRoot, arg0)
+				delete(e.constImm, s.Ins.Dst)
+				stName := s.Ins.Elem
+				if stName == "" && e.regType[arg0] != "" {
+					stName = e.regType[arg0]
+				}
+				if stName != "" {
+					ptrType := ir.TypeName("*" + goType(ir.TypeName(strings.TrimPrefix(string(stName), "*"))))
+					e.hoistTypes[s.Ins.Dst] = ptrType
+					e.declType[s.Ins.Dst] = ptrType
+					e.regType[s.Ins.Dst] = ptrType
+					e.scalarPtr[s.Ins.Dst] = true
+					e.regPtr[s.Ins.Dst] = true
+				}
+				if e.regType[arg0] != "" {
+					e.hoistTypes[arg0] = e.regType[arg0]
+					e.declType[arg0] = e.regType[arg0]
+				}
+				if e.regType[root] != "" {
+					e.hoistTypes[root] = e.regType[root]
+					e.declType[root] = e.regType[root]
+				}
+			}
+			if s.Kind == ir.SKInstr && s.Ins.Op == ir.OpAlloca && strings.HasPrefix(s.Ins.Sym, "struct") && s.Ins.Elem != "" && !e.isParam[s.Ins.Dst] {
+				ht := s.Ins.Elem
+				if isStructType(string(ht), e.structs) || e.isStructTypeName(string(ht)) {
+					stName := strings.TrimPrefix(string(ht), "*")
+					ht = ir.TypeName(exportName(stName))
+				}
+				e.hoistTypes[s.Ins.Dst] = ht
+				e.declType[s.Ins.Dst] = ht
+				e.regType[s.Ins.Dst] = ht
+				e.scalarPtr[s.Ins.Dst] = false
+				e.regPtr[s.Ins.Dst] = false
+			}
+			if s.Kind == ir.SKInstr && (s.Ins.Sym == "decl_uninit" || s.Ins.Sym == "decl" || s.Ins.Sym == "ptr_alias") && s.Ins.Elem != "" && !e.isParam[s.Ins.Dst] {
+				ht := s.Ins.Elem
+				if s.Ins.Sym == "ptr_alias" {
+					if isStructType(string(ht), e.structs) || e.isStructTypeName(string(ht)) {
+						stName := strings.TrimPrefix(string(ht), "*")
+						ht = ir.TypeName("*" + exportName(stName))
+						e.scalarPtr[s.Ins.Dst] = true
+						e.regPtr[s.Ins.Dst] = true
+					} else {
+						if !isSliceType(ht) && !strings.HasPrefix(string(ht), "[]") && !strings.HasPrefix(string(ht), "*") {
+							ht = ir.TypeName("[]" + goType(ht))
+						}
+						e.regPtr[s.Ins.Dst] = true
+						e.elemIdx[s.Ins.Dst] = true
+					}
+				}
+				e.hoistTypes[s.Ins.Dst] = ht
+				e.declType[s.Ins.Dst] = ht
+			}
+			for _, ins := range s.ForInit {
+				if ins.Dst != 0 && !e.isParam[ins.Dst] && strings.HasPrefix(ins.Sym, "__cmp_") && isUsedAsCond(f, ins.Dst) {
+					e.hoistTypes[ins.Dst] = ir.TypBool
+					e.declType[ins.Dst] = ir.TypBool
+					e.regType[ins.Dst] = ir.TypBool
+				}
+			}
+			for _, ins := range s.ForPost {
+				if ins.Dst != 0 && !e.isParam[ins.Dst] && strings.HasPrefix(ins.Sym, "__cmp_") && isUsedAsCond(f, ins.Dst) {
+					e.hoistTypes[ins.Dst] = ir.TypBool
+					e.declType[ins.Dst] = ir.TypBool
+					e.regType[ins.Dst] = ir.TypBool
+				}
+			}
+			if s.Kind == ir.SKInstr && s.Ins.Dst != 0 && !e.isParam[s.Ins.Dst] && strings.HasPrefix(s.Ins.Sym, "__cmp_") && isUsedAsCond(f, s.Ins.Dst) {
+				e.hoistTypes[s.Ins.Dst] = ir.TypBool
+				e.declType[s.Ins.Dst] = ir.TypBool
+				e.regType[s.Ins.Dst] = ir.TypBool
+			}
+			walkDecls(s.ForBody)
+			walkDecls(s.ThenBody)
+			walkDecls(s.ElseBody)
+			walkDecls(s.DoBody)
+			for _, c := range s.SwitchCases {
+				walkDecls(c.Body)
+			}
+		}
+	}
+	walkDecls(f.Stmts)
 	// hoist only multi-write temps; single-write uses := at first assign (I2)
 	hoisted := map[ir.Value]bool{}
 	// register order, not map order: the var block is emitted here and map
@@ -733,20 +1191,44 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 		hoistOrder = append(hoistOrder, v)
 	}
 	sort.Slice(hoistOrder, func(i, j int) bool { return hoistOrder[i] < hoistOrder[j] })
+	seenVarNames := map[string]bool{}
+	e.regName = map[ir.Value]string{}
+	for _, p := range f.Params {
+		nm := sanitizeIdent(p.Name)
+		e.regName[p.Reg] = nm
+		if p.Type != "" {
+			e.regType[p.Reg] = p.Type
+		}
+		seenVarNames[nm] = true
+	}
 	for _, v := range hoistOrder {
 		if e.isParam[v] {
 			continue
 		}
+		if _, ok := e.constImm[v]; ok && !e.noConstArg[v] && !e.isAddrOf[v] {
+			continue
+		}
 		if n, ok := e.regName[v]; ok && n != fmt.Sprintf("v%d", int(v)) {
-			continue // aliased to another register or expression
+			if (strings.ContainsAny(n, ".[]+-*/") || isVregName(n)) && !strings.HasPrefix(n, "&") {
+				continue // aliased to another register or expression
+			}
 		}
-		if e.suppress[v] || !isRead(v, f.Stmts) {
-			continue // never read / folded away
+		nm := strings.TrimPrefix(e.nameOf(v), "&")
+		if seenVarNames[nm] {
+			hoisted[v] = true
+			continue
 		}
-		if e.writeCount[v] <= 1 {
+		if e.isInitAlloca[v] || e.suppress[v] || !isRead(v, f.Stmts) {
+			continue // never read / folded away / initialized aggregate
+		}
+		isUninit := e.declType[v] != "" || e.isAddrOf[v]
+		if !hasGoto && !isUninit && e.writeCount[v] == 1 && !e.nestedWrite[v] {
 			continue // := at first write
 		}
-		t := e.regType[v]
+		t := e.hoistTypes[v]
+		if t == "" {
+			t = e.regType[v]
+		}
 		if t == "" {
 			t = e.dom
 		}
@@ -754,17 +1236,32 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 		if gt == "" {
 			gt = "int"
 		}
-		if e.regPtr[v] {
-			if e.scalarPtr[v] {
-				gt = "*" + goType(t)
-			} else if t == ir.TypUint8 || t == "" {
+		if isStructType(string(t), e.structs) || e.isStructTypeName(string(t)) {
+			if e.scalarPtr[v] || strings.HasPrefix(string(t), "*") {
+				if !strings.HasPrefix(gt, "*") {
+					gt = "*" + gt
+				}
+			}
+		} else if e.regPtr[v] {
+			if e.scalarPtr[v] || strings.HasPrefix(string(t), "*") {
+				if strings.HasPrefix(string(t), "*") {
+					gt = goType(t)
+				} else {
+					gt = "*" + goType(t)
+				}
+			} else if t == ir.TypUint8 || t == "" || t == ir.TypeName("[]byte") {
 				gt = "[]byte"
-			} else {
+			} else if strings.HasPrefix(string(t), "[]") {
+				gt = string(t)
+			} else if isSliceType(t) {
 				gt = "[]" + goType(t)
+			} else {
+				gt = "[]byte"
 			}
 		}
-		fmt.Fprintf(b, "%svar %s %s\n", e.pad(), e.nameOf(v), gt)
+		fmt.Fprintf(b, "%svar %s %s\n", e.pad(), nm, gt)
 		hoisted[v] = true
+		seenVarNames[nm] = true
 	}
 	e.hoist = false
 	e.cseExpr = map[string]string{} // fresh CSE for real emit
@@ -776,22 +1273,41 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 	e.noConstArg = map[ir.Value]bool{}
 	// declared/regName rebuild: params + printed vars only (drop hoist pure-alias pollution)
 	e.declared = map[ir.Value]bool{}
+	for v := range hoisted {
+		e.declared[v] = true
+	}
 	e.regName = map[ir.Value]string{}
+	e.regPtr = map[ir.Value]bool{}
+	e.elemIdx = map[ir.Value]bool{}
+	e.constImm = map[ir.Value]int64{}
+	e.suppress = map[ir.Value]bool{}
 	for v, t := range e.hoistTypes {
 		e.regType[v] = t
 	}
 	for _, p := range f.Params {
 		nm := sanitizeIdent(p.Name)
 		e.regName[p.Reg] = nm
-		e.regType[p.Reg] = p.Type
+		if p.StructName != "" {
+			if p.Ptr {
+				if e.scalarPtr[p.Reg] {
+					e.regType[p.Reg] = ir.TypeName("*" + exportName(p.StructName))
+				} else {
+					e.regType[p.Reg] = ir.TypeName("[]" + exportName(p.StructName))
+				}
+			} else {
+				e.regType[p.Reg] = ir.TypeName(exportName(p.StructName))
+			}
+		} else if p.Ptr && (p.Type == ir.TypUint8 || p.Type == "") {
+			e.regType[p.Reg] = ir.TypeName("[]byte")
+		} else {
+			e.regType[p.Reg] = p.Type
+		}
 		e.regPtr[p.Reg] = p.Ptr || p.ArrayLen > 0
 		e.declared[p.Reg] = true
-		if e.scalarPtr[p.Reg] {
-			// keep
-		} else if p.ArrayLen > 0 {
+		if p.ArrayLen > 0 {
 			e.elemIdx[p.Reg] = true
-		} else if p.Ptr && p.Type != ir.TypUint8 {
-			e.elemIdx[p.Reg] = p.Type == ir.TypUint32 || p.Type == ir.TypUint64
+		} else if p.Ptr && !e.scalarPtr[p.Reg] {
+			e.elemIdx[p.Reg] = true
 		}
 	}
 	for v := range hoisted {
@@ -821,12 +1337,8 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 	}
 	head := pre[:idx+2]
 	varsAnd := pre[idx+2:]
-	// Classic densify chain + L32/R → bits.Rotate* (Gemini rec 2).
-	// foldLiveRangeCopies / foldCrcBitSteps stay unit-tested only — CRC/mono regressions.
+
 	stripped := stripDeadVars(stripDeadAssigns(foldTempCopies(foldRotateExprs(foldSingleUseExprs(foldRotateExprs(foldSingleUseExprs(foldTempCopies(varsAnd + body.String()))))))))
-	stripped = foldManualRotHelpers(stripped)
-	stripped = foldIdentityCallCast(stripped)
-	stripped = foldRedundantBoolNe0(stripped)
 	stripped = dropRedundantParens(stripped)
 	stripped = charLiteralsForBytes(stripped)
 	stripped = dropDoubleCasts(stripped)
@@ -887,10 +1399,22 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 	stripped = astDropIdentityMasks(stripped)
 	stripped = astSimplifyIndexCasts(stripped)
 	stripped = astStripAssignLiteralCasts(stripped)
+	stripped = astDeduplicateLogical(stripped)
+	stripped = astCollapseBooleanRegisterChains(stripped)
+	stripped = astFoldBooleanClosures(stripped)
+	stripped = astFixBooleanArithmetic(stripped)
 	// clear décalé AVANT le déroulage : sinon la boucle de zéros serait
 	// dépliée en N stores au lieu d'un clear.
 	stripped = astTransformShiftedClearLoops(stripped)
-	stripped = astUnrollConstTripLoops(stripped)
+stripped = astUnrollConstTripLoops(stripped)
+	stripped = archNormalize3ClauseLoops(stripped)
+	stripped = regexp.MustCompile(`\[(?:int\()?-(\d+)\)?:\s*\]`).ReplaceAllString(stripped, "[:]")
+	stripped = regexp.MustCompile(`\bfor\s+(?:1\s*!=\s*0|true|1)\s*\{`).ReplaceAllString(stripped, "for {")
+	stripped = regexp.MustCompile(`\(\s*([a-zA-Z0-9_\.]+)\s*\+\s*0\s*\)`).ReplaceAllString(stripped, "$1")
+	stripped = regexp.MustCompile(`&([A-Za-z0-9_\.]+\s*\[[^\]]+\])\.([A-Za-z0-9_]+)`).ReplaceAllString(stripped, "$1.$2")
+	stripped = astFixStringSliceCallArgs(stripped)
+	// Suppression du code mort après les retours inconditionnels (F4).
+	stripped = astEliminateDeadCodeAfterReturn(stripped)
 	// Post-unroll and copy/clear loop transforms may leave dead idx locals.
 	stripped = stripDeadVars(stripDeadAssigns(stripped))
 	b.Reset()
@@ -900,10 +1424,30 @@ func emitFunc(b *strings.Builder, f *ir.Func, e *env) error {
 	return nil
 }
 
+func stmtsEndReturn(st []ir.Stmt) bool {
+	if len(st) == 0 {
+		return false
+	}
+	last := st[len(st)-1]
+	if last.Kind == ir.SKInstr {
+		return last.Ins.Op == ir.OpReturn
+	}
+	if last.Kind == ir.SKIf {
+		return len(last.ElseBody) > 0 && stmtsEndReturn(last.ThenBody) && stmtsEndReturn(last.ElseBody)
+	}
+	return false
+}
+
 func emitStmts(b *strings.Builder, e *env, ss []ir.Stmt) error {
 	for i, s := range ss {
 		if err := emitStmt(b, e, s, ss, i); err != nil {
 			return err
+		}
+		if s.Kind == ir.SKInstr && s.Ins.Op == ir.OpReturn {
+			break
+		}
+		if s.Kind == ir.SKIf && len(s.ElseBody) > 0 && stmtsEndReturn(s.ThenBody) && stmtsEndReturn(s.ElseBody) {
+			break
 		}
 	}
 	return nil
@@ -915,14 +1459,17 @@ func emitStmt(b *strings.Builder, e *env, s ir.Stmt, ss []ir.Stmt, stmtIdx int) 
 		return emitIns(b, e, s.Ins, ss, stmtIdx)
 	case ir.SKFor:
 		e.clearCSE()
+		forceLoopCounters(e, s)
 		for _, ins := range s.ForInit {
 			if err := emitIns(b, e, ins, nil, 0); err != nil {
 				return err
 			}
 		}
+		e.forPostStack = append(e.forPostStack, s.ForPost)
 		if len(s.ForCondPrep) > 0 {
 			// short-circuit && : emit conjuncts in order so loads after bounds checks
 			if emitForShortCircuit(b, e, s) {
+				e.forPostStack = e.forPostStack[:len(e.forPostStack)-1]
 				return nil
 			}
 			e.lines(b, "for {\n")
@@ -930,37 +1477,57 @@ func emitStmt(b *strings.Builder, e *env, s ir.Stmt, ss []ir.Stmt, stmtIdx int) 
 			e.clearCSE()
 			for _, ins := range s.ForCondPrep {
 				if err := emitIns(b, e, ins, nil, 0); err != nil {
+					e.forPostStack = e.forPostStack[:len(e.forPostStack)-1]
 					return err
 				}
 			}
 			e.lines(b, "if !("+condStr(e, s)+") { break }\n")
 			if err := emitStmts(b, e, s.ForBody); err != nil {
+				e.forPostStack = e.forPostStack[:len(e.forPostStack)-1]
 				return err
 			}
-			for _, ins := range s.ForPost {
-				if err := emitIns(b, e, ins, nil, 0); err != nil {
-					return err
+			if !stmtsEndReturn(s.ForBody) {
+				postStart := b.Len()
+				for _, ins := range s.ForPost {
+					if err := emitIns(b, e, ins, nil, 0); err != nil {
+						e.forPostStack = e.forPostStack[:len(e.forPostStack)-1]
+						return err
+					}
 				}
+				ensureLoopIncrement(b, e, s, postStart)
 			}
 			e.ind--
 			e.lines(b, "}\n")
 			e.clearCSE()
+			e.forPostStack = e.forPostStack[:len(e.forPostStack)-1]
 			return nil
 		}
-		e.lines(b, "for "+condStr(e, s)+" {\n")
+		cs := condStr(e, s)
+		if cs == "1 != 0" || cs == "true" || cs == "" || cs == "1" {
+			e.lines(b, "for {\n")
+		} else {
+			e.lines(b, "for "+cs+" {\n")
+		}
 		e.ind++
 		e.clearCSE()
 		if err := emitStmts(b, e, s.ForBody); err != nil {
+			e.forPostStack = e.forPostStack[:len(e.forPostStack)-1]
 			return err
 		}
-		for _, ins := range s.ForPost {
-			if err := emitIns(b, e, ins, nil, 0); err != nil {
-				return err
+		if !stmtsEndReturn(s.ForBody) {
+			postStart := b.Len()
+			for _, ins := range s.ForPost {
+				if err := emitIns(b, e, ins, nil, 0); err != nil {
+					e.forPostStack = e.forPostStack[:len(e.forPostStack)-1]
+					return err
+				}
 			}
+			ensureLoopIncrement(b, e, s, postStart)
 		}
 		e.ind--
 		e.lines(b, "}\n")
 		e.clearCSE()
+		e.forPostStack = e.forPostStack[:len(e.forPostStack)-1]
 		return nil
 	case ir.SKSwitch:
 		for _, ins := range s.SwitchPrep {
@@ -968,7 +1535,11 @@ func emitStmt(b *strings.Builder, e *env, s ir.Stmt, ss []ir.Stmt, stmtIdx int) 
 				return err
 			}
 		}
-		e.lines(b, "switch "+e.arg(s.SwitchOn, e.dom)+" {\n")
+		swType := e.regType[s.SwitchOn]
+		if swType == "" || swType == ir.TypString {
+			swType = ir.TypInt
+		}
+		e.lines(b, "switch "+e.arg(s.SwitchOn, swType)+" {\n")
 		e.ind++
 		for i, c := range s.SwitchCases {
 			if len(c.Labels) == 0 {
@@ -979,13 +1550,21 @@ func emitStmt(b *strings.Builder, e *env, s ir.Stmt, ss []ir.Stmt, stmtIdx int) 
 				}
 			}
 			e.ind++
-			e.clearCSE()
 			if err := emitStmts(b, e, c.Body); err != nil {
 				return err
 			}
 			e.ind--
-			if i < len(s.SwitchCases)-1 {
-				e.lines(b, "fallthrough\n")
+			if i < len(s.SwitchCases)-1 && c.Fall {
+				lastIsTerm := false
+				if len(c.Body) > 0 {
+					lastSt := c.Body[len(c.Body)-1]
+					if lastSt.Kind == ir.SKInstr && (lastSt.Ins.Op == ir.OpBreak || lastSt.Ins.Op == ir.OpReturn) {
+						lastIsTerm = true
+					}
+				}
+				if !lastIsTerm {
+					e.lines(b, "fallthrough\n")
+				}
 			}
 		}
 		e.ind--
@@ -1016,6 +1595,9 @@ func emitStmt(b *strings.Builder, e *env, s ir.Stmt, ss []ir.Stmt, stmtIdx int) 
 		e.clearCSE()
 		return nil
 	case ir.SKIf:
+		if emitIfShortCircuit(b, e, s) {
+			return nil
+		}
 		for _, ins := range s.ForInit {
 			if err := emitIns(b, e, ins, nil, 0); err != nil {
 				return err
@@ -1048,6 +1630,104 @@ func emitStmt(b *strings.Builder, e *env, s ir.Stmt, ss []ir.Stmt, stmtIdx int) 
 	default:
 		return fmt.Errorf("emit: stmt kind %v", s.Kind)
 	}
+}
+
+// emitIfShortCircuit emits short-circuited conditional branches for &&-chains in ForInit
+// so loads on the right of && run only if the left operand succeeds (C short-circuit).
+func emitIfShortCircuit(b *strings.Builder, e *env, s ir.Stmt) bool {
+	if s.CondOp != "truthy" && s.CondOp != "" {
+		return false
+	}
+	defs := map[ir.Value]ir.Instr{}
+	for _, ins := range s.ForInit {
+		defs[ins.Dst] = ins
+	}
+	leaves := flattenLandLeaves(defs, s.CondLeft)
+	if len(leaves) < 2 {
+		return false
+	}
+	hasLoadDep := false
+	for _, leaf := range leaves {
+		if prepHasLoad(defs, leaf) {
+			hasLoadDep = true
+			break
+		}
+	}
+	if !hasLoadDep {
+		return false
+	}
+
+	// Case 1: No else body and positive condition -> nested if blocks
+	if len(s.ElseBody) == 0 && !s.CondNot {
+		emitted := map[ir.Value]bool{}
+		for _, leaf := range leaves {
+			if err := emitPrepDeps(b, e, leaf, defs, emitted); err != nil {
+				_ = err
+			}
+			e.lines(b, "if "+boolOfVreg(e, leaf)+" {\n")
+			e.ind++
+			e.clearCSE()
+		}
+		if err := emitStmts(b, e, s.ThenBody); err != nil {
+			return true
+		}
+		for range leaves {
+			e.ind--
+			e.lines(b, "}\n")
+		}
+		e.clearCSE()
+		return true
+	}
+
+	// Case 2: With else body or negated condition -> boolean gate
+	condVar := fmt.Sprintf("cond_%d", s.CondLeft)
+	e.lines(b, "var "+condVar+" bool\n")
+	emitted := map[ir.Value]bool{}
+	for i, leaf := range leaves {
+		if err := emitPrepDeps(b, e, leaf, defs, emitted); err != nil {
+			_ = err
+		}
+		if i == len(leaves)-1 {
+			e.lines(b, "if "+boolOfVreg(e, leaf)+" {\n")
+			e.ind++
+			e.lines(b, condVar+" = true\n")
+			e.ind--
+			e.lines(b, "}\n")
+		} else {
+			e.lines(b, "if "+boolOfVreg(e, leaf)+" {\n")
+			e.ind++
+			e.clearCSE()
+		}
+	}
+	for i := 0; i < len(leaves)-1; i++ {
+		e.ind--
+		e.lines(b, "}\n")
+	}
+	e.clearCSE()
+
+	check := condVar
+	if s.CondNot {
+		check = "!" + condVar
+	}
+	e.lines(b, "if "+check+" {\n")
+	e.ind++
+	e.clearCSE()
+	if err := emitStmts(b, e, s.ThenBody); err != nil {
+		return true
+	}
+	e.ind--
+	if len(s.ElseBody) > 0 {
+		e.lines(b, "} else {\n")
+		e.ind++
+		e.clearCSE()
+		if err := emitStmts(b, e, s.ElseBody); err != nil {
+			return true
+		}
+		e.ind--
+	}
+	e.lines(b, "}\n")
+	e.clearCSE()
+	return true
 }
 
 // emitForShortCircuit emits for{ check1; check2; body } for &&-chains in ForCondPrep
@@ -1091,9 +1771,11 @@ func emitForShortCircuit(b *strings.Builder, e *env, s ir.Stmt) bool {
 	if err := emitStmts(b, e, s.ForBody); err != nil {
 		return true // already wrote for{ — must finish
 	}
+	postStart := b.Len()
 	for _, ins := range s.ForPost {
 		_ = emitIns(b, e, ins, nil, 0)
 	}
+	ensureLoopIncrement(b, e, s, postStart)
 	e.ind--
 	e.lines(b, "}\n")
 	e.clearCSE()
@@ -1183,22 +1865,94 @@ func boolOfVreg(e *env, v ir.Value) string {
 	return n // after isUsedAsCond emit, cmp results are bool
 }
 
+func isSliceType(t ir.TypeName) bool {
+	return strings.HasPrefix(string(t), "[]")
+}
+
 func condStr(e *env, s ir.Stmt) string {
-	// pointer NULL checks
-	if e.regPtr[s.CondLeft] && (s.CondOp == "!=" || s.CondOp == "==" || s.CondOp == "truthy" || s.CondOp == "") {
-		if s.CondOp == "truthy" || s.CondOp == "" {
-			return e.nameOf(s.CondLeft) + " != nil"
+	// string empty / NULL checks
+	if (e.regType[s.CondLeft] == ir.TypString || e.regType[s.CondRight] == ir.TypString || e.isStringReg[s.CondLeft] || e.isStringReg[s.CondRight]) && (s.CondOp == "!=" || s.CondOp == "==" || s.CondOp == "truthy" || s.CondOp == "") {
+		sn := e.nameOf(s.CondLeft)
+		if e.regType[s.CondLeft] != ir.TypString && !e.isStringReg[s.CondLeft] {
+			sn = e.nameOf(s.CondRight)
 		}
-		if imm, ok := e.constImm[s.CondRight]; ok && imm == 0 {
-			if s.CondOp == "!=" {
-				return e.nameOf(s.CondLeft) + " != nil"
+		if s.CondOp == "!=" || s.CondOp == "truthy" || s.CondOp == "" {
+			return sn + ` != ""`
+		}
+		return sn + ` == ""`
+	}
+	// function pointer NULL checks
+	isFuncL := strings.HasPrefix(string(e.regType[s.CondLeft]), "func(") || strings.HasPrefix(goType(e.regType[s.CondLeft]), "func(")
+	isFuncR := strings.HasPrefix(string(e.regType[s.CondRight]), "func(") || strings.HasPrefix(goType(e.regType[s.CondRight]), "func(")
+	if isFuncL || isFuncR {
+		sn := e.nameOf(s.CondLeft)
+		if !isFuncL {
+			sn = e.nameOf(s.CondRight)
+		}
+		if s.CondOp == "!=" || s.CondOp == "truthy" || s.CondOp == "" {
+			return sn + " != nil"
+		}
+		return sn + " == nil"
+	}
+	// pointer NULL checks
+	isPtrL := e.regPtr[s.CondLeft] || e.scalarPtr[s.CondLeft] || strings.HasPrefix(string(e.regType[s.CondLeft]), "*") || isStructType(string(e.regType[s.CondLeft]), e.structs)
+	isPtrR := e.regPtr[s.CondRight] || e.scalarPtr[s.CondRight] || strings.HasPrefix(string(e.regType[s.CondRight]), "*") || isStructType(string(e.regType[s.CondRight]), e.structs)
+	if (isPtrL || isPtrR) && (s.CondOp == "!=" || s.CondOp == "==" || s.CondOp == "truthy" || s.CondOp == "") {
+		if s.CondOp == "truthy" || s.CondOp == "" {
+			if !e.scalarPtr[s.CondLeft] && !strings.HasPrefix(string(e.regType[s.CondLeft]), "*") && !isStructType(string(e.regType[s.CondLeft]), e.structs) && isSliceType(e.regType[s.CondLeft]) {
+				return "len(" + e.nameOf(s.CondLeft) + ") != 0"
 			}
-			return e.nameOf(s.CondLeft) + " == nil"
+			return fmt.Sprintf("%s != nil", e.nameOf(s.CondLeft))
+		}
+		if isPtrL && !isPtrR {
+			if s.CondOp == "!=" {
+				return fmt.Sprintf("%s != nil", e.nameOf(s.CondLeft))
+			}
+			return fmt.Sprintf("%s == nil", e.nameOf(s.CondLeft))
+		}
+		if isPtrR && !isPtrL {
+			if s.CondOp == "!=" {
+				return fmt.Sprintf("%s != nil", e.nameOf(s.CondRight))
+			}
+			return fmt.Sprintf("%s == nil", e.nameOf(s.CondRight))
+		}
+		rName := e.nameOf(s.CondRight)
+		if imm, ok := e.constImm[s.CondRight]; (ok && imm == 0) || rName == "0" || rName == `""` || rName == "nil" || isPtrR {
+			if isPtrL && isPtrR && (e.constImm[s.CondRight] != 0 || rName != "0") && (e.constImm[s.CondLeft] != 0 || e.nameOf(s.CondLeft) != "0") {
+				return fmt.Sprintf("%s %s %s", e.nameOf(s.CondLeft), s.CondOp, e.nameOf(s.CondRight))
+			}
+			if s.CondOp == "!=" {
+				return fmt.Sprintf("%s != nil", e.nameOf(s.CondLeft))
+			}
+			return fmt.Sprintf("%s == nil", e.nameOf(s.CondLeft))
+		}
+		if imm, ok := e.constImm[s.CondLeft]; (ok && imm == 0) || e.nameOf(s.CondLeft) == "0" || e.nameOf(s.CondLeft) == "nil" {
+			if s.CondOp == "!=" {
+				return fmt.Sprintf("%s != nil", e.nameOf(s.CondRight))
+			}
+			return fmt.Sprintf("%s == nil", e.nameOf(s.CondRight))
 		}
 	}
 	ctx := e.regType[s.CondLeft]
 	if ctx == "" {
-		ctx = e.dom
+		ctx = e.declType[s.CondLeft]
+	}
+	if ctx == "" {
+		ctx = e.hoistTypes[s.CondLeft]
+	}
+	rctx := e.regType[s.CondRight]
+	if rctx == "" {
+		rctx = e.declType[s.CondRight]
+	}
+	if rctx == "" {
+		rctx = e.hoistTypes[s.CondRight]
+	}
+	if ctx == "" && rctx != "" {
+		ctx = rctx
+	} else if rctx == "" && ctx != "" {
+		rctx = ctx
+	} else if ctx == "" && rctx == "" {
+		ctx, rctx = e.dom, e.dom
 	}
 	if s.CondOp == "truthy" || s.CondOp == "" {
 		arg := e.arg(s.CondLeft, ctx)
@@ -1206,15 +1960,47 @@ func condStr(e *env, s ir.Stmt) string {
 			// strip accidental "(bool) != 0" if nested
 			return stripBoolNe0(arg)
 		}
+		if e.scalarPtr[s.CondLeft] || strings.HasPrefix(string(e.regType[s.CondLeft]), "*") || isStructType(string(e.regType[s.CondLeft]), e.structs) {
+			return arg + " != nil"
+		}
+		if e.regPtr[s.CondLeft] || isSliceType(e.regType[s.CondLeft]) {
+			return "len(" + arg + ") != 0"
+		}
 		return arg + " != 0"
-	}
-	rctx := e.regType[s.CondRight]
-	if rctx == "" {
-		rctx = ctx
 	}
 	// unify comparison types (size_t i < len)
 	if ctx != rctx {
+		if ctx == ir.TypString || rctx == ir.TypString {
+			if imm, ok := e.constImm[s.CondRight]; ok && imm == 0 {
+				if s.CondOp == "==" {
+					return e.nameOf(s.CondLeft) + ` == ""`
+				}
+				return e.nameOf(s.CondLeft) + ` != ""`
+			}
+			if imm, ok := e.constImm[s.CondLeft]; ok && imm == 0 {
+				if s.CondOp == "==" {
+					return e.nameOf(s.CondRight) + ` == ""`
+				}
+				return e.nameOf(s.CondRight) + ` != ""`
+			}
+		}
 		switch {
+		case (ctx == ir.TypUint32 || ctx == ir.TypInt32) && (rctx == ir.TypUint64 || rctx == ir.TypInt64):
+			if e.regType[s.CondLeft] == ir.TypUint32 || e.declType[s.CondLeft] == ir.TypUint32 || e.hoistTypes[s.CondLeft] == ir.TypUint32 {
+				ctx, rctx = ir.TypUint32, ir.TypUint32
+			} else {
+				ctx, rctx = ir.TypUint64, ir.TypUint64
+			}
+		case (rctx == ir.TypUint32 || rctx == ir.TypInt32) && (ctx == ir.TypUint64 || ctx == ir.TypInt64):
+			if e.regType[s.CondRight] == ir.TypUint32 || e.declType[s.CondRight] == ir.TypUint32 || e.hoistTypes[s.CondRight] == ir.TypUint32 {
+				ctx, rctx = ir.TypUint32, ir.TypUint32
+			} else {
+				ctx, rctx = ir.TypUint64, ir.TypUint64
+			}
+		case ctx == ir.TypUint32 && rctx == ir.TypUint32:
+			ctx, rctx = ir.TypUint32, ir.TypUint32
+		case ctx == ir.TypInt32 && rctx == ir.TypInt32:
+			ctx, rctx = ir.TypInt32, ir.TypInt32
 		case ctx == ir.TypUint64 || rctx == ir.TypUint64:
 			ctx, rctx = ir.TypUint64, ir.TypUint64
 		case ctx == ir.TypUint32 || rctx == ir.TypUint32:
@@ -1231,6 +2017,9 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 	case ir.OpNop:
 		return nil
 	case ir.OpConst:
+		delete(e.regPtr, ins.Dst)
+		delete(e.elemIdx, ins.Dst)
+		delete(e.scalarPtr, ins.Dst)
 		e.constImm[ins.Dst] = ins.Imm
 		if ins.Elem != "" {
 			e.regType[ins.Dst] = ins.Elem
@@ -1239,16 +2028,56 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 		return nil
 	case ir.OpMov:
 		delete(e.constImm, ins.Dst)
+		// double pointer slice advance: *p = (*p)[1:]
+		if ins.Sym == "double_ptr_adv1" {
+			e.line(b, "*%s = (*%s)[1:]\n", e.nameOf(ins.Dst), e.nameOf(ins.Dst))
+			return nil
+		}
+		if ins.Sym == "ptr_cast" {
+			if strings.HasPrefix(string(ins.Elem), "*") {
+				e.needUnsafe = true
+				e.scalarPtr[ins.Dst] = true
+				e.regPtr[ins.Dst] = true
+				e.regType[ins.Dst] = ins.Elem
+				srcName := e.nameOf(ins.Args[0])
+				srcType := e.regType[ins.Args[0]]
+				isSlice := (isSliceType(srcType) || srcType == ir.TypUint8 || srcType == ir.TypeName("[]byte") || (e.regPtr[ins.Args[0]] && !e.scalarPtr[ins.Args[0]])) &&
+					!strings.HasPrefix(string(srcType), "*") &&
+					!strings.HasPrefix(srcName, "&") &&
+					!e.isStructTypeName(string(srcType))
+				if isSlice {
+					srcName = fmt.Sprintf("unsafe.SliceData(%s)", srcName)
+				}
+				writeAssign(b, e, ins.Dst, fmt.Sprintf("(%s)(unsafe.Pointer(%s))", goType(ins.Elem), srcName))
+				return nil
+			}
+			if ins.Elem == ir.TypUint8 || ins.Elem == ir.TypeName("[]byte") {
+				srcType := e.regType[ins.Args[0]]
+				srcName := e.nameOf(ins.Args[0])
+				if srcType == "any" || srcType == ir.TypeName("any_") {
+					writeAssign(b, e, ins.Dst, fmt.Sprintf("%s.([]byte)", srcName))
+				} else {
+					writeAssign(b, e, ins.Dst, e.arg(ins.Args[0], ir.TypeName("[]byte")))
+				}
+				e.regPtr[ins.Dst] = true
+				e.elemIdx[ins.Dst] = true
+				e.regType[ins.Dst] = ir.TypeName("[]byte")
+				return nil
+			}
+		}
 		// C declaration with an initializer: the declared type wins over the
 		// initializer's. `u32 u = x[3]` must hold 32 bits, not the byte's 8.
-		if ins.Sym == "decl" && ins.Elem != "" {
+		if (ins.Sym == "decl" || ins.Sym == "decl_uninit") && ins.Elem != "" {
 			e.declType[ins.Dst] = ins.Elem
 			e.regType[ins.Dst] = ins.Elem
+			if isSliceType(ins.Elem) || ins.Elem == ir.TypeName("[]byte") || strings.HasPrefix(string(ins.Elem), "*") {
+				e.regPtr[ins.Dst] = true
+			}
+			if ins.Sym == "decl_uninit" || len(ins.Args) == 0 {
+				return nil
+			}
 			writeAssign(b, e, ins.Dst, e.arg(ins.Args[0], ins.Elem))
 			e.regType[ins.Dst] = ins.Elem
-			// constImm stays deleted: a declared local is assigned again inside
-			// loops, and substituting its initial value there re-seeded the fnv
-			// accumulator on every iteration.
 			return nil
 		}
 		// offSlot cursor is always uint64 byte offset
@@ -1271,20 +2100,29 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 		}
 		// global bind: v = globalName (module string table)
 		if strings.HasPrefix(ins.Sym, "global:") {
-			gname := sanitizeIdent(ins.Sym[len("global:"):])
+			rawName := ins.Sym[len("global:"):]
+			gname := exportName(rawName)
 			e.regPtr[ins.Dst] = true
 			gt := ir.TypUint8
 			if e.globalType != nil {
-				if t, ok := e.globalType[gname]; ok && t != "" {
+				if t, ok := e.globalType[sanitizeIdent(rawName)]; ok && t != "" {
+					gt = t
+				} else if t, ok := e.globalType[gname]; ok && t != "" {
 					gt = t
 				}
+			}
+			if e.globalLen != nil && (e.globalLen[sanitizeIdent(rawName)] > 0 || e.globalLen[gname] > 0) {
+				gt = ir.TypeName("[]byte")
 			}
 			e.regType[ins.Dst] = gt
 			e.elemIdx[ins.Dst] = true
 			writeAssign(b, e, ins.Dst, gname)
 			e.lastGlobalName = gname
 			if e.globalLen != nil {
-				e.lastGlobalLen = e.globalLen[gname]
+				e.lastGlobalLen = e.globalLen[sanitizeIdent(rawName)]
+				if e.lastGlobalLen == 0 {
+					e.lastGlobalLen = e.globalLen[gname]
+				}
 			} else {
 				e.lastGlobalLen = 0
 			}
@@ -1293,28 +2131,129 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 		// explicit C cast
 		if ins.Sym == "cast" && ins.Elem != "" {
 			e.regType[ins.Dst] = ins.Elem
+			if imm, ok := e.constImm[ins.Args[0]]; ok {
+				e.constImm[ins.Dst] = imm
+			}
 			writeAssign(b, e, ins.Dst, e.arg(ins.Args[0], ins.Elem))
 			return nil
 		}
-		// prefer destination type (size_t i = 0 must stay uint64)
-		ctx := e.regType[ins.Dst]
-		if ctx == "" {
-			ctx = e.regType[ins.Args[0]]
+		// global symbol reference (e.g. hoisted string or constant table)
+		if ins.Sym != "" && len(ins.Args) == 0 {
+			if strings.HasPrefix(ins.Sym, "fn:") {
+				fnName := exportName(strings.TrimPrefix(ins.Sym, "fn:"))
+				writeAssign(b, e, ins.Dst, fnName)
+				return nil
+			}
+			if strings.HasPrefix(ins.Sym, "__str_") {
+				e.regType[ins.Dst] = ir.TypString
+				e.isStringReg[ins.Dst] = true
+			}
+			writeAssign(b, e, ins.Dst, ins.Sym)
+			return nil
 		}
-		if ctx == "" {
-			ctx = e.dom
+		var ctx ir.TypeName
+		if len(ins.Args) > 0 && (strings.HasPrefix(e.nameOf(ins.Args[0]), "__str_") || e.regType[ins.Args[0]] == ir.TypString || e.isStringReg[ins.Args[0]]) {
+			e.regType[ins.Dst] = ir.TypString
+			e.isStringReg[ins.Dst] = true
+			ctx = ir.TypString
+		} else if e.hoistTypes[ins.Dst] != "" {
+			ctx = e.hoistTypes[ins.Dst]
+		} else if e.declType[ins.Dst] != "" {
+			ctx = e.declType[ins.Dst]
+		} else {
+			if len(ins.Args) > 0 && e.regType[ins.Args[0]] != "" {
+				ctx = e.regType[ins.Args[0]]
+			} else if e.regType[ins.Dst] != "" {
+				ctx = e.regType[ins.Dst]
+			} else {
+				ctx = e.dom
+			}
 		}
 		// slice advance: p = p[1:]
 		if ins.Sym == "ptr_adv1" && e.regPtr[ins.Dst] {
 			e.line(b, "%s = %s[1:]\n", e.nameOf(ins.Dst), e.nameOf(ins.Args[0]))
 			return nil
 		}
+		if ins.Sym == "addr_of" && !e.isParam[ins.Dst] {
+			root := e.rootOf(ins.Args[0])
+			delete(e.constImm, ins.Args[0])
+			delete(e.constImm, root)
+			delete(e.valRoot, ins.Args[0])
+			delete(e.constImm, ins.Dst)
+			e.isAddrOf[ins.Args[0]] = true
+			e.isAddrOf[root] = true
+			e.scalarPtr[ins.Dst] = true
+			e.regPtr[ins.Dst] = true
+			e.declType[ins.Args[0]] = e.regType[ins.Args[0]]
+			e.hoistTypes[ins.Args[0]] = e.regType[ins.Args[0]]
+			srcType := e.regType[ins.Args[0]]
+			if srcType == "" {
+				srcType = e.dom
+			}
+			ptrType := ir.TypeName("*" + string(srcType))
+			if ins.Elem != "" {
+				if !strings.HasPrefix(string(ins.Elem), "*") {
+					ptrType = ir.TypeName("*" + exportName(string(ins.Elem)))
+				} else {
+					ptrType = ins.Elem
+				}
+			}
+			e.regType[ins.Dst] = ptrType
+			e.hoistTypes[ins.Dst] = ptrType
+			srcn := e.nameOf(ins.Args[0])
+			writeAssign(b, e, ins.Dst, "&"+srcn)
+			return nil
+		}
 		// pointer alias / offset cursor: share name with root (only for new non-param registers)
 		if ins.Sym == "ptr_alias" && !e.isParam[ins.Dst] && e.regName[ins.Dst] == "" {
+			elemType := ins.Elem
+			isStruct := isStructType(string(elemType), e.structs) || e.isStructTypeName(string(elemType))
+			if isStruct {
+				stName := strings.TrimPrefix(string(elemType), "*")
+				elemType = ir.TypeName("*" + exportName(stName))
+				e.scalarPtr[ins.Dst] = true
+				e.regPtr[ins.Dst] = true
+			} else if elemType == ir.TypUint8 || elemType == "" {
+				elemType = ir.TypeName("[]byte")
+			} else if !strings.HasPrefix(string(elemType), "[]") && !strings.HasPrefix(string(elemType), "*") {
+				elemType = ir.TypeName("[]" + goType(elemType))
+			}
+			if imm, isImm := e.constImm[ins.Args[0]]; isImm && imm == 0 {
+				e.regPtr[ins.Dst] = true
+				if !isStruct {
+					e.elemIdx[ins.Dst] = true
+				}
+				e.regType[ins.Dst] = elemType
+				e.hoistTypes[ins.Dst] = elemType
+				writeAssign(b, e, ins.Dst, "nil")
+				delete(e.constImm, ins.Dst)
+				return nil
+			}
 			srcn := e.nameOf(ins.Args[0])
-			// address-of struct value → arg uses &v
-			if !e.regPtr[ins.Args[0]] && ins.Sym == "ptr_alias" {
+			if srcn == "" || srcn == "0" || srcn == "nil" {
+				e.regPtr[ins.Dst] = true
+				if !isStruct {
+					e.elemIdx[ins.Dst] = true
+				}
+				e.regType[ins.Dst] = elemType
+				e.hoistTypes[ins.Dst] = elemType
+				writeAssign(b, e, ins.Dst, "nil")
+				delete(e.constImm, ins.Dst)
+				return nil
+			}
+			if isStruct {
+				writeAssign(b, e, ins.Dst, e.arg(ins.Args[0], elemType))
+				e.regType[ins.Dst] = elemType
+				e.hoistTypes[ins.Dst] = elemType
+				delete(e.constImm, ins.Dst)
+				return nil
+			}
+			if !e.regPtr[ins.Args[0]] && (isStructType(string(e.regType[ins.Args[0]]), e.structs) || e.isStructTypeName(string(e.regType[ins.Args[0]]))) {
 				e.isAddrOf[ins.Dst] = true
+				e.isAddrOf[ins.Args[0]] = true
+				e.scalarPtr[ins.Dst] = true
+				delete(e.constImm, ins.Args[0])
+				delete(e.constImm, ins.Dst)
 			}
 			e.regName[ins.Dst] = srcn
 			e.regPtr[ins.Dst] = true
@@ -1327,7 +2266,7 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			return nil
 		}
 		// pointer alias: no new var (avoid unused slice temps)
-		if len(ins.Args) > 0 && e.regPtr[ins.Args[0]] && ins.Sym != "ptr_adv1" && ins.Sym != "ptr_add" && !e.isParam[ins.Dst] {
+		if len(ins.Args) > 0 && e.regPtr[ins.Args[0]] && ins.Sym != "ptr_adv1" && ins.Sym != "ptr_add" && !e.isParam[ins.Dst] && e.writeCount[ins.Dst] <= 1 && e.writeCount[ins.Args[0]] <= 1 {
 			e.regName[ins.Dst] = e.nameOf(ins.Args[0])
 			e.regPtr[ins.Dst] = true
 			e.regType[ins.Dst] = e.regType[ins.Args[0]]
@@ -1340,6 +2279,12 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			return nil
 		}
 		e.regType[ins.Dst] = ctx
+		if !e.scalarPtr[ins.Dst] && isScalarIR(ctx) {
+			delete(e.regPtr, ins.Dst)
+			delete(e.elemIdx, ins.Dst)
+		} else if isSliceType(ctx) || ctx == ir.TypeName("[]byte") || strings.HasPrefix(string(ctx), "*") {
+			e.regPtr[ins.Dst] = true
+		}
 		writeAssign(b, e, ins.Dst, e.arg(ins.Args[0], ctx))
 		e.regType[ins.Dst] = ctx
 		delete(e.constImm, ins.Dst)
@@ -1351,21 +2296,88 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 		}
 	case ir.OpAdd, ir.OpSub, ir.OpMul, ir.OpDiv, ir.OpMod, ir.OpAnd, ir.OpOr, ir.OpXor, ir.OpShl, ir.OpShr:
 		ctx := e.dom
-		if t := e.regType[ins.Args[0]]; t != "" {
+		if ctx == "" || isSliceType(ctx) || strings.HasPrefix(string(ctx), "[]") || strings.HasPrefix(string(ctx), "*") {
+			ctx = ir.TypUint64
+		}
+		if t := e.regType[ins.Args[0]]; t != "" && t != ir.TypBool && !isSliceType(t) && !strings.HasPrefix(string(t), "[]") && !strings.HasPrefix(string(t), "*") {
 			ctx = t
 		}
 		if ins.Sym == "offslot" || ins.Elem == ir.TypUint64 {
 			ctx = ir.TypUint64
 		}
-		// A declared local never narrows below its C width. Only widening is
-		// applied — the front deliberately widens cursors and offsets, and
-		// forcing the declared type on those broke every kernel.
-		if t, ok := e.declType[ins.Dst]; ok && !e.regPtr[ins.Dst] && typeWidth(t) > typeWidth(ctx) {
+		if t, ok := e.declType[ins.Dst]; ok && !e.regPtr[ins.Dst] && t != ir.TypInt && t != "" {
 			ctx = t
 		}
-		// ptr ± byteOff → reslice when front marked ptr_add
-		if e.regPtr[ins.Args[0]] && (ins.Op == ir.OpAdd || ins.Op == ir.OpSub) && ins.Sym == "ptr_add" {
+		// ptr - ptr / string - ptr → byte offset difference
+		isPtrOrSlice := func(v ir.Value) bool {
+			if e.regPtr[v] || isSliceType(e.regType[v]) || e.regType[v] == ir.TypString || e.regType[v] == ir.TypeName("[]byte") {
+				return true
+			}
+			nm := e.nameOf(v)
+			return nm == "cs" || nm == "s" || strings.HasPrefix(nm, "cs[") || strings.HasPrefix(nm, "s[")
+		}
+		if ins.Op == ir.OpSub && len(ins.Args) == 2 && isPtrOrSlice(ins.Args[0]) && isPtrOrSlice(ins.Args[1]) {
+			a0 := e.nameOf(ins.Args[0])
+			a1 := e.nameOf(ins.Args[1])
+			len0 := fmt.Sprintf("len(%s)", a0)
+			if a0 == "nil" || a0 == "0" {
+				len0 = "0"
+			}
+			len1 := fmt.Sprintf("len(%s)", a1)
+			if a1 == "nil" || a1 == "0" {
+				len1 = "0"
+			}
+			rhs := fmt.Sprintf("uint64(%s - %s)", len1, len0)
+			if len0 == "0" {
+				rhs = fmt.Sprintf("uint64(%s)", len1)
+			}
+			e.regType[ins.Dst] = ir.TypUint64
+			delete(e.regPtr, ins.Dst)
+			delete(e.elemIdx, ins.Dst)
+			writeAssign(b, e, ins.Dst, rhs)
+			delete(e.constImm, ins.Dst)
+			break
+		}
+		// string + 0 → string
+		if ins.Op == ir.OpAdd && len(ins.Args) == 2 && (e.regType[ins.Args[0]] == ir.TypString || e.regType[ins.Args[1]] == ir.TypString) {
+			if imm, ok := e.constImm[ins.Args[1]]; ok && imm == 0 {
+				writeAssign(b, e, ins.Dst, e.arg(ins.Args[0], ir.TypString))
+				e.regType[ins.Dst] = ir.TypString
+				delete(e.constImm, ins.Dst)
+				break
+			}
+			if imm, ok := e.constImm[ins.Args[0]]; ok && imm == 0 {
+				writeAssign(b, e, ins.Dst, e.arg(ins.Args[1], ir.TypString))
+				e.regType[ins.Dst] = ir.TypString
+				delete(e.constImm, ins.Dst)
+				break
+			}
+		}
+		// ptr ± byteOff → reslice when front marked ptr_add or operand is slice
+		isArg0Scalar := (isScalarIR(e.hoistTypes[ins.Args[0]]) || isScalarIR(e.declType[ins.Args[0]]) || isScalarIR(e.regType[ins.Args[0]])) && !e.regPtr[ins.Args[0]] && !e.elemIdx[ins.Args[0]] && !e.stackArr[ins.Args[0]]
+		if _, isImm := e.constImm[ins.Args[0]]; isImm {
+			isArg0Scalar = true
+		}
+		isArg0Slice := !isArg0Scalar && (isSliceType(e.regType[ins.Args[0]]) || e.regType[ins.Args[0]] == ir.TypeName("[]byte") || strings.HasPrefix(string(e.regType[ins.Args[0]]), "["))
+
+		if ins.Sym == "ptr_add" && (e.scalarPtr[ins.Args[0]] || strings.HasPrefix(string(e.regType[ins.Args[0]]), "*")) {
 			off := wrapInt(e.arg(ins.Args[1], ir.TypInt))
+			if off == "0" || off == "" || isConstZero(ins.Args[1], e.f) {
+				e.regName[ins.Dst] = e.nameOf(ins.Args[0])
+				e.scalarPtr[ins.Dst] = true
+				e.regPtr[ins.Dst] = true
+				e.regType[ins.Dst] = e.regType[ins.Args[0]]
+				e.declared[ins.Dst] = true
+				delete(e.constImm, ins.Dst)
+				break
+			}
+		}
+
+		if (ins.Sym == "ptr_add" && (e.regPtr[ins.Args[0]] || isArg0Slice) && !e.scalarPtr[ins.Args[0]]) || (!isArg0Scalar && (e.regPtr[ins.Args[0]] || isArg0Slice) && !e.scalarPtr[ins.Args[0]] && (ins.Op == ir.OpAdd || ins.Op == ir.OpSub)) {
+			off := wrapInt(e.arg(ins.Args[1], ir.TypInt))
+			if off == "nil" || off == "int(nil)" || off == "" {
+				off = "0"
+			}
 			if ins.Op == ir.OpSub {
 				// cannot reslice backward safely; keep name (best-effort)
 				e.regName[ins.Dst] = e.nameOf(ins.Args[0])
@@ -1375,6 +2387,7 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 				delete(e.constImm, ins.Dst)
 				break
 			}
+
 			// dead reslice temp (never read) → skip
 			if e.f != nil && !isRead(ins.Dst, e.f.Stmts) {
 				e.regName[ins.Dst] = e.nameOf(ins.Args[0])
@@ -1386,9 +2399,27 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 				break
 			}
 			rhs := fmt.Sprintf("%s[%s:]", e.nameOf(ins.Args[0]), off)
+			stName := strings.TrimPrefix(strings.TrimPrefix(string(e.regType[ins.Args[0]]), "[]"), "*")
+			if e.isStructTypeName(stName) || e.findStruct(stName) != nil {
+				if !strings.HasPrefix(string(e.regType[ins.Args[0]]), "[]") && !e.elemIdx[ins.Args[0]] {
+					rhs = e.nameOf(ins.Args[0])
+				} else {
+					rhs = fmt.Sprintf("&%s[%s]", e.nameOf(ins.Args[0]), off)
+				}
+			}
+			if strings.Contains(off, "-") {
+				rhs = e.nameOf(ins.Args[0])
+			}
 			writeAssign(b, e, ins.Dst, rhs)
 			e.regPtr[ins.Dst] = true
-			e.regType[ins.Dst] = e.regType[ins.Args[0]]
+			if e.isStructTypeName(stName) || e.findStruct(stName) != nil {
+				e.regType[ins.Dst] = ir.TypeName("*" + exportName(stName))
+				e.scalarPtr[ins.Dst] = true
+			} else if strings.HasPrefix(string(e.regType[ins.Args[0]]), "[") {
+				e.regType[ins.Dst] = ir.TypeName("[]byte")
+			} else {
+				e.regType[ins.Dst] = e.regType[ins.Args[0]]
+			}
 			if e.regType[ins.Dst] == "" {
 				e.regType[ins.Dst] = ir.TypUint8
 			}
@@ -1396,19 +2427,7 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			delete(e.constImm, ins.Dst)
 			break
 		}
-		// other ptr+int: alias (offset in later loads via front fold)
-		if e.regPtr[ins.Args[0]] && ins.Op == ir.OpAdd {
-			e.regName[ins.Dst] = e.nameOf(ins.Args[0])
-			e.regPtr[ins.Dst] = true
-			e.regType[ins.Dst] = e.regType[ins.Args[0]]
-			e.declared[ins.Dst] = true
-			e.elemIdx[ins.Dst] = e.elemIdx[ins.Args[0]]
-			if e.stackArr[ins.Args[0]] {
-				e.stackArr[ins.Dst] = true
-			}
-			delete(e.constImm, ins.Dst)
-			break
-		}
+
 		// `W - r`: remember it, a variable rotation is recognised by this shape
 		if ins.Op == ir.OpSub {
 			if c, ok := e.constImm[ins.Args[0]]; ok && c > 0 {
@@ -1450,16 +2469,40 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 				}
 			}
 		}
+		if ins.Sym == "struct_ptr_add" && len(ins.Args) == 2 {
+			base := e.nameOf(ins.Args[0])
+			off := e.arg(ins.Args[1], ir.TypInt)
+			if !strings.HasPrefix(string(e.regType[ins.Args[0]]), "[]") && !e.elemIdx[ins.Args[0]] {
+				writeAssign(b, e, ins.Dst, base)
+			} else {
+				writeAssign(b, e, ins.Dst, fmt.Sprintf("&%s[%s]", base, off))
+			}
+			e.scalarPtr[ins.Dst] = true
+			e.regPtr[ins.Dst] = true
+			e.regType[ins.Dst] = ins.Elem
+			break
+		}
 		op := binOp(ins.Op)
 		var rhs string
 		if ins.Op == ir.OpShl || ins.Op == ir.OpShr {
 			// C integer promotions: shifting a byte must widen before shift
 			lctx := ctx
 			if t := e.regType[ins.Args[0]]; t == ir.TypUint8 || t == "" {
-				if e.dom == ir.TypUint32 || e.dom == ir.TypUint64 {
+				if e.dom == ir.TypUint32 || e.dom == ir.TypUint64 || e.dom == ir.TypInt64 {
 					lctx = e.dom
 				} else {
-					lctx = ir.TypUint32
+					hasInt64 := false
+					for _, rt := range e.regType {
+						if rt == ir.TypInt64 {
+							hasInt64 = true
+							break
+						}
+					}
+					if hasInt64 {
+						lctx = ir.TypInt64
+					} else {
+						lctx = ir.TypUint32
+					}
 				}
 			} else if t != "" {
 				lctx = t
@@ -1476,14 +2519,18 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			if lctx == ir.TypUint32 && e.dom == ir.TypUint64 {
 				lctx = ir.TypUint64
 			}
-			rhs = fmt.Sprintf("%s %s %s", e.arg(ins.Args[0], lctx), op, e.arg(ins.Args[1], ir.TypUint8))
+			if lctx == ir.TypInt64 || lctx == ir.TypUint64 {
+				rhs = fmt.Sprintf("%s(%s %s %s)", goType(lctx), e.arg(ins.Args[0], lctx), op, e.arg(ins.Args[1], ir.TypUint8))
+			} else {
+				rhs = fmt.Sprintf("%s %s %s", e.arg(ins.Args[0], lctx), op, e.arg(ins.Args[1], ir.TypUint8))
+			}
 			ctx = lctx
 			if rIsImm {
 				e.shiftDef[ins.Dst] = shiftRec{op: ins.Op, src: ins.Args[0], amt: rImm, typ: lctx}
 			} else {
 				e.shiftDef[ins.Dst] = shiftRec{op: ins.Op, src: ins.Args[0], typ: lctx, amtReg: ins.Args[1], amtVar: true}
 			}
-		} else if ins.Op == ir.OpOr || ins.Op == ir.OpXor {
+		} else if ins.Op == ir.OpOr || ins.Op == ir.OpXor || ins.Op == ir.OpAnd {
 			// ROT peephole: (x<<k)|(x>>(W-k)) or (x<<k)^(x>>(W-k)) → bits.RotateLeftW(x, k)
 			if rot, ok := tryRotateLeft(e, ins); ok {
 				e.needBits = true
@@ -1493,11 +2540,30 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 				break
 			}
 			t0, t1 := e.regType[ins.Args[0]], e.regType[ins.Args[1]]
-			if t0 != "" {
-				ctx = t0
+			_, isConst0 := e.constImm[ins.Args[0]]
+			_, isConst1 := e.constImm[ins.Args[1]]
+			if isConst0 {
+				t0 = ""
 			}
-			if t0 == ir.TypUint64 || t1 == ir.TypUint64 {
-				ctx = ir.TypUint64
+			if isConst1 {
+				t1 = ""
+			}
+			if t0 == ir.TypBool && t1 == ir.TypBool && (ins.Op == ir.OpOr || ins.Op == ir.OpAnd) {
+				if ins.Op == ir.OpOr {
+					op = "||"
+				} else {
+					op = "&&"
+				}
+				ctx = ir.TypBool
+			} else {
+				if t0 != "" {
+					ctx = t0
+				} else if t1 != "" {
+					ctx = t1
+				}
+				if (!isConst0 && t0 == ir.TypUint64) || (!isConst1 && t1 == ir.TypUint64) {
+					ctx = ir.TypUint64
+				}
 			}
 			// track a^b pairs so ROTR's re-xor of the same operands still folds
 			if ins.Op == ir.OpXor && len(ins.Args) == 2 {
@@ -1509,27 +2575,61 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 				e.valRoot[ins.Dst] = ins.Dst
 			}
 			rhs = fmt.Sprintf("%s %s %s", e.arg(ins.Args[0], ctx), op, e.arg(ins.Args[1], ctx))
-		} else if e.regPtr[ins.Args[0]] && ins.Op == ir.OpAdd {
+		} else if _, isImm0 := e.constImm[ins.Args[0]]; !isImm0 && e.regPtr[ins.Args[0]] && !e.scalarPtr[ins.Args[0]] && !isScalarIR(e.hoistTypes[ins.Args[0]]) && !isScalarIR(e.declType[ins.Args[0]]) && (isSliceType(e.regType[ins.Args[0]]) || e.regType[ins.Args[0]] == ir.TypeName("[]byte") || strings.HasPrefix(string(e.regType[ins.Args[0]]), "[]")) && (ins.Op == ir.OpAdd || ins.Op == ir.OpSub) && !isIntLit(e.nameOf(ins.Args[0])) && !strings.Contains(e.nameOf(ins.Args[0]), "(") {
 			p := e.nameOf(ins.Args[0])
-			off := e.arg(ins.Args[1], ir.TypInt)
-			rhs = fmt.Sprintf("%s[%s:]", p, off)
+			if imm, ok := e.constImm[ins.Args[1]]; ok && imm < 0 {
+				rhs = p
+			} else {
+				off := e.arg(ins.Args[1], ir.TypInt)
+				if off == "nil" || off == "int(nil)" || off == "" {
+					off = "0"
+				}
+				if strings.Contains(off, "-") {
+					rhs = p
+				} else {
+					rhs = fmt.Sprintf("%s[%s:]", p, off)
+				}
+			}
 			e.regPtr[ins.Dst] = true
 			e.elemIdx[ins.Dst] = true
 			e.regType[ins.Dst] = e.regType[ins.Args[0]]
+			e.hoistTypes[ins.Dst] = e.regType[ins.Args[0]]
 		} else {
 			// Prefer left operand type (C assignment context).
 			// add/sub: if either side is int (signed loop index / negative off), keep int
 			// so ptr offsets like nblocks*4 + i*4 with i<0 stay correct.
 			// or/and/xor: widen to u64 if either side is u64 (load64 pattern)
 			t0, t1 := e.regType[ins.Args[0]], e.regType[ins.Args[1]]
-			if t0 != "" {
-				ctx = t0
+			if _, ok := e.constImm[ins.Args[0]]; ok {
+				t0 = ""
 			}
-			if (ins.Op == ir.OpAdd || ins.Op == ir.OpSub || ins.Op == ir.OpMul || ins.Op == ir.OpOr || ins.Op == ir.OpAnd || ins.Op == ir.OpXor) && (t0 == ir.TypUint64 || t1 == ir.TypUint64) {
+			if _, ok := e.constImm[ins.Args[1]]; ok {
+				t1 = ""
+			}
+			if t0 != "" && t0 != ir.TypBool && !isSliceType(t0) && !strings.HasPrefix(string(t0), "[]") && !strings.HasPrefix(string(t0), "*") {
+				ctx = t0
+			} else if t1 != "" && t1 != ir.TypBool && !isSliceType(t1) && !strings.HasPrefix(string(t1), "[]") && !strings.HasPrefix(string(t1), "*") {
+				ctx = t1
+			} else if e.dom != "" && !isSliceType(e.dom) && !strings.HasPrefix(string(e.dom), "[]") && !strings.HasPrefix(string(e.dom), "*") {
+				ctx = e.dom
+			} else {
 				ctx = ir.TypUint64
 			}
-			if (ins.Op == ir.OpAdd || ins.Op == ir.OpSub || ins.Op == ir.OpMul || ins.Op == ir.OpOr || ins.Op == ir.OpAnd || ins.Op == ir.OpXor) && (t0 == ir.TypInt64 || t1 == ir.TypInt64) {
+			if t0 == ir.TypUint64 || t1 == ir.TypUint64 {
+				ctx = ir.TypUint64
+			} else if t0 == ir.TypInt64 || t1 == ir.TypInt64 {
 				ctx = ir.TypInt64
+				if t0 != ir.TypInt64 && !e.regPtr[ins.Args[0]] && e.hoistTypes != nil {
+					e.hoistTypes[ins.Args[0]] = ir.TypInt64
+				}
+				if t1 != ir.TypInt64 && !e.regPtr[ins.Args[1]] && e.hoistTypes != nil {
+					e.hoistTypes[ins.Args[1]] = ir.TypInt64
+				}
+			} else if t0 == ir.TypInt || t1 == ir.TypInt {
+				ctx = ir.TypInt
+			}
+			if dstType := e.hoistTypes[ins.Dst]; dstType != "" && !e.regPtr[ins.Dst] && dstType != ir.TypInt && !isSliceType(dstType) && !strings.HasPrefix(string(dstType), "*") {
+				ctx = dstType
 			}
 			// x + 0 / 0 + x → x (never for offSlot bumps — loop-carried)
 			if ins.Op == ir.OpAdd && ins.Sym != "offslot" && !e.noConstArg[ins.Args[0]] && !e.noConstArg[ins.Args[1]] {
@@ -1538,21 +2638,21 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 					if imm2, ok2 := e.constImm[ins.Args[0]]; ok2 {
 						// const + 0 → const only
 						e.constImm[ins.Dst] = imm2
-						break
+						return nil
 					}
 					writeAssign(b, e, ins.Dst, e.arg(ins.Args[0], ctx))
 					delete(e.constImm, ins.Dst)
-					break
+					return nil
 				}
 				if imm, ok := e.constImm[ins.Args[0]]; ok && imm == 0 {
 					e.regType[ins.Dst] = ctx
 					if imm2, ok2 := e.constImm[ins.Args[1]]; ok2 {
 						e.constImm[ins.Dst] = imm2
-						break
+						return nil
 					}
 					writeAssign(b, e, ins.Dst, e.arg(ins.Args[1], ctx))
 					delete(e.constImm, ins.Dst)
-					break
+					return nil
 				}
 			}
 			// offSlot arithmetic kills stale const on cursor
@@ -1567,12 +2667,12 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 				if imm, ok := e.constImm[ins.Args[0]]; ok && imm == 0 {
 					e.regType[ins.Dst] = ctx
 					e.constImm[ins.Dst] = 0
-					break
+					return nil
 				}
 				if imm, ok := e.constImm[ins.Args[1]]; ok && imm == 0 {
 					e.regType[ins.Dst] = ctx
 					e.constImm[ins.Dst] = 0
-					break
+					return nil
 				}
 			}
 			// (x/k)*k with k power-of-two → x &^ (k-1)  (byte align down)
@@ -1609,15 +2709,7 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 				delete(e.constImm, ins.Dst)
 				break
 			}
-			tReg := e.regType[ins.Args[0]]
-			goT := goType(tReg)
-			if strings.HasPrefix(goT, "[]") && ins.Op == ir.OpAdd {
-				rhs = fmt.Sprintf("%s[int(%s):]", e.arg(ins.Args[0], tReg), e.arg(ins.Args[1], ir.TypInt))
-				e.regType[ins.Dst] = tReg
-				writeAssign(b, e, ins.Dst, rhs)
-				delete(e.constImm, ins.Dst)
-				break
-			}
+
 			arg0 := e.arg(ins.Args[0], ctx)
 			arg1 := e.arg(ins.Args[1], ctx)
 			// C: & | ^ bind looser than << >> ; Go: same precedence, left-assoc.
@@ -1635,10 +2727,14 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			rhs = fmt.Sprintf("%s %s %s", arg0, op, arg1)
 		}
 		e.regType[ins.Dst] = ctx
+		delete(e.regPtr, ins.Dst)
+		delete(e.elemIdx, ins.Dst)
+		delete(e.scalarPtr, ins.Dst)
 		writeAssign(b, e, ins.Dst, rhs)
 		delete(e.constImm, ins.Dst)
 	case ir.OpAlloca:
 		if strings.HasPrefix(ins.Sym, "struct_init:") {
+			e.isInitAlloca[ins.Dst] = true
 			parts := strings.SplitN(ins.Sym[len("struct_init:"):], ":", 3)
 			if len(parts) == 3 {
 				sname := exportName(parts[0])
@@ -1648,7 +2744,67 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 				if cName != "" {
 					nm = cName
 				}
-				e.line(b, "var %s = %s{%s}\n", nm, sname, formatInitCSV(initCSV, ""))
+				var matched *ir.StructType
+				for idx := range e.structs {
+					if strings.EqualFold(e.structs[idx].Name, parts[0]) {
+						matched = &e.structs[idx]
+						break
+					}
+				}
+				hasSpecialField := false
+				if matched != nil {
+					for _, fld := range matched.Fields {
+						if fld.ArrayLen != 0 {
+							hasSpecialField = true
+							break
+						}
+					}
+				}
+				if strings.Trim(initCSV, "0, ") == "" {
+					e.line(b, "var %s = %s{}\n", nm, sname)
+				} else if hasSpecialField && matched != nil {
+					csvParts := strings.Split(initCSV, ",")
+					var fldAssigns []string
+					for i, fld := range matched.Fields {
+						if i < len(csvParts) {
+							p := strings.TrimSpace(csvParts[i])
+							if fld.ArrayLen < 0 && (p == "0" || p == "") {
+								p = "nil"
+							} else if fld.ArrayLen > 0 {
+								if p == "false" || p == "f" {
+									fldAssigns = append(fldAssigns, fmt.Sprintf("%s: [%d]byte{'f', 'a', 'l', 's', 'e'}", exportName(fld.Name), fld.ArrayLen))
+									continue
+								}
+								if p == "true" || p == "t" {
+									fldAssigns = append(fldAssigns, fmt.Sprintf("%s: [%d]byte{'t', 'r', 'u', 'e'}", exportName(fld.Name), fld.ArrayLen))
+									continue
+								}
+								if strings.HasPrefix(p, "\"") && strings.HasSuffix(p, "\"") {
+									strVal := strings.Trim(p, "\"")
+									var byteLits []string
+									for _, b := range []byte(strVal) {
+										byteLits = append(byteLits, fmt.Sprintf("%d", b))
+									}
+									fldAssigns = append(fldAssigns, fmt.Sprintf("%s: [%d]byte{%s}", exportName(fld.Name), fld.ArrayLen, strings.Join(byteLits, ", ")))
+									continue
+								}
+								if p == "0" || p == "" {
+									continue
+								}
+								fldAssigns = append(fldAssigns, fmt.Sprintf("%s: [%d]byte{%s}", exportName(fld.Name), fld.ArrayLen, p))
+								continue
+							}
+							fldAssigns = append(fldAssigns, fmt.Sprintf("%s: %s", exportName(fld.Name), p))
+						}
+					}
+					if len(fldAssigns) == 0 {
+						e.line(b, "var %s = %s{}\n", nm, sname)
+					} else {
+						e.line(b, "var %s = %s{%s}\n", nm, sname, strings.Join(fldAssigns, ", "))
+					}
+				} else {
+					e.line(b, "var %s = %s{%s}\n", nm, sname, formatInitCSV(initCSV, ""))
+				}
 				e.declared[ins.Dst] = true
 				e.regName[ins.Dst] = nm
 				e.regType[ins.Dst] = ins.Elem
@@ -1664,6 +2820,14 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			// addressable struct; treat as pointer-compatible via &
 			return nil
 		}
+		if ins.Sym != "" && !strings.HasPrefix(ins.Sym, "init:") && !strings.HasPrefix(ins.Sym, "struct") {
+			if _, isGlob := e.globalType[ins.Sym]; isGlob {
+				e.regName[ins.Dst] = ins.Sym
+				e.declared[ins.Dst] = true
+				e.regType[ins.Dst] = e.globalType[ins.Sym]
+				return nil
+			}
+		}
 		e.lastGlobalName = ""
 		e.lastGlobalLen = 0
 		n := ins.Imm
@@ -1674,6 +2838,7 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 		nm := e.nameOf(ins.Dst)
 		initVal := ""
 		if strings.HasPrefix(ins.Sym, "init:") {
+			e.isInitAlloca[ins.Dst] = true
 			initData := ins.Sym[len("init:"):]
 			initCSV := initData
 			if idx := strings.Index(initData, ":"); idx > 0 {
@@ -1704,13 +2869,51 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 	case ir.OpField:
 		// dst = arg0.Field  (pointer or value); Imm=arrayLen if array field; Imm<0 = pointer field
 		base := e.nameOf(ins.Args[0])
+		if strings.HasPrefix(base, "&") {
+			base = strings.TrimPrefix(base, "&")
+		}
 		field := exportName(ins.Sym)
 		rhs := fmt.Sprintf("%s.%s", base, field)
 		if ins.Imm > 0 || ins.Imm < 0 {
 			e.elemIdx[ins.Dst] = true
 			e.regPtr[ins.Dst] = true
 		}
-		if ins.Elem != "" {
+		stName := string(e.regType[ins.Args[0]])
+		stName = strings.TrimPrefix(stName, "*")
+		fldType := ir.TypeName("")
+		var matchedFld *ir.StructField
+		for _, st := range e.structs {
+			if strings.EqualFold(st.Name, stName) || strings.EqualFold(exportName(st.Name), exportName(stName)) {
+				for i := range st.Fields {
+					fld := &st.Fields[i]
+					if strings.EqualFold(fld.Name, ins.Sym) || strings.EqualFold(exportName(fld.Name), field) {
+						fldType = fld.Type
+						matchedFld = fld
+						break
+					}
+				}
+			}
+		}
+		if matchedFld != nil {
+			gt := goType(matchedFld.Type)
+			if matchedFld.ArrayLen < 0 {
+				if gt == "any" || matchedFld.Type == "any" || matchedFld.Type == "" {
+					fldType = ir.TypeName("any")
+				} else {
+					e.regPtr[ins.Dst] = true
+					if isStructType(string(matchedFld.Type), e.structs) || e.isStructTypeName(string(matchedFld.Type)) {
+						stName := strings.TrimPrefix(string(matchedFld.Type), "*")
+						fldType = ir.TypeName("*" + exportName(stName))
+						e.scalarPtr[ins.Dst] = true
+					} else if fldType == ir.TypUint8 {
+						fldType = ir.TypeName("[]byte")
+					}
+				}
+			}
+		}
+		if fldType != "" {
+			e.regType[ins.Dst] = fldType
+		} else if ins.Elem != "" {
 			e.regType[ins.Dst] = ins.Elem
 		} else {
 			e.regType[ins.Dst] = ir.TypUint8
@@ -1720,28 +2923,121 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 		delete(e.constImm, ins.Dst)
 	case ir.OpFStore:
 		base := e.nameOf(ins.Args[0])
+		if strings.HasPrefix(base, "&") {
+			base = strings.TrimPrefix(base, "&")
+		}
+		if strings.HasSuffix(base, ":]") {
+			base = base[:len(base)-2] + "]"
+		}
 		field := exportName(ins.Sym)
 		ctx := ins.Elem
-		if ctx == "" {
+		var targetFld *ir.StructField
+		stName := string(e.regType[ins.Args[0]])
+		stName = strings.TrimPrefix(stName, "*")
+		for _, st := range e.structs {
+			if st.Name == stName || exportName(st.Name) == exportName(stName) {
+				for i := range st.Fields {
+					fld := &st.Fields[i]
+					if fld.Name == ins.Sym || exportName(fld.Name) == field {
+						ctx = fld.Type
+						targetFld = fld
+						break
+					}
+				}
+			}
+		}
+		if (e.regPtr[ins.Args[1]] || isSliceType(e.regType[ins.Args[1]])) && (ctx == "" || ctx == ir.TypUint8) {
+			ctx = e.regType[ins.Args[1]]
+			if ctx == "" || ctx == ir.TypUint8 {
+				ctx = ir.TypeName("[]byte")
+			}
+		} else if ctx == "" {
 			ctx = e.regType[ins.Args[1]]
 		}
-		e.line(b, "%s.%s = %s\n", base, field, e.arg(ins.Args[1], ctx))
+		valStr := e.arg(ins.Args[1], ctx)
+		if targetFld != nil {
+			gt := goType(targetFld.Type)
+			if targetFld.ArrayLen < 0 {
+				if isZeroLit(valStr) || valStr == "0" || valStr == "&0" || valStr == "nil" {
+					valStr = "nil"
+				} else if isStructType(string(targetFld.Type), e.structs) || (!isPrimitiveGoType(gt) && gt != "byte" && gt != "any") {
+					if !e.regPtr[ins.Args[1]] && !strings.HasPrefix(string(e.regType[ins.Args[1]]), "*") && !strings.HasPrefix(valStr, "&") && !strings.HasPrefix(valStr, "(") && !strings.HasPrefix(valStr, "*") {
+						valStr = "&" + valStr
+					}
+				}
+			} else if !isPrimitiveGoType(gt) && !isStructType(string(targetFld.Type), e.structs) && !strings.HasPrefix(gt, "func(") {
+				if isZeroLit(valStr) || valStr == "0" || valStr == "&0" || valStr == "nil" {
+					valStr = "nil"
+				}
+			}
+			if targetFld.ArrayLen == 0 && isPrimitiveGoType(gt) && gt != "any" {
+				if valStr == "nil" || valStr == "&0" {
+					valStr = "0"
+				}
+			}
+			if gt == "any" || targetFld.Type == "any" || targetFld.Type == "" {
+				if strings.HasSuffix(valStr, "[:]") {
+					valStr = strings.TrimSuffix(valStr, "[:]")
+				}
+				if valStr == "&0" || valStr == "0" || valStr == "&&0" {
+					valStr = "nil"
+				}
+			}
+		}
+		e.line(b, "%s.%s = %s\n", base, field, valStr)
 		killCSEBase(e, base)
 	case ir.OpNot:
 		ctx := e.regType[ins.Args[0]]
-		if ctx == "" {
-			ctx = e.dom
+		if ctx == "" || ctx == ir.TypInt || ctx == ir.TypUint8 {
+			if e.dom == ir.TypUint64 || e.dom == ir.TypInt64 {
+				ctx = e.dom
+			} else {
+				ctx = ir.TypUint32
+			}
+		}
+		if imm, ok := e.constImm[ins.Args[0]]; ok {
+			val := ^imm
+			switch ctx {
+			case ir.TypUint8:
+				val = int64(uint8(^uint8(imm)))
+			case ir.TypUint16:
+				val = int64(uint16(^uint16(imm)))
+			case ir.TypUint32:
+				val = int64(uint32(^uint32(imm)))
+			case ir.TypUint64:
+				val = int64(^uint64(imm))
+			}
+			e.constImm[ins.Dst] = val
+			e.regType[ins.Dst] = ctx
+			break
 		}
 		writeAssign(b, e, ins.Dst, "^"+e.arg(ins.Args[0], ctx))
 		e.regType[ins.Dst] = ctx
 		delete(e.constImm, ins.Dst)
 	case ir.OpLoad:
+		if ins.Sym == "deref_slice_ptr" && len(ins.Args) == 1 {
+			p := ins.Args[0]
+			rhs := fmt.Sprintf("(*%s)", e.nameOf(p))
+			writeAssign(b, e, ins.Dst, rhs)
+			e.regPtr[ins.Dst] = true
+			e.elemIdx[ins.Dst] = true
+			e.regType[ins.Dst] = ir.TypeName("[]byte")
+			delete(e.constImm, ins.Dst)
+			return nil
+		}
 		elem := ins.Elem
-		if (elem == "" || elem == ir.TypUint8) && e.regType[ins.Args[0]] != "" && e.regType[ins.Args[0]] != ir.TypUint8 {
-			elem = e.regType[ins.Args[0]]
+		if t := e.regType[ins.Args[0]]; t != "" && t != ir.TypUint8 {
+			if strings.HasPrefix(string(t), "[]") {
+				elem = ir.TypeName(strings.TrimPrefix(string(t), "[]"))
+			} else if elem == "" {
+				elem = t
+			}
 		}
 		if elem == "" {
-			elem = e.regType[ins.Args[0]]
+			elem = ir.TypUint8
+		}
+		if elem == "byte" {
+			elem = ir.TypUint8
 		}
 		var rhs string
 		if len(ins.Args) == 1 {
@@ -1759,19 +3055,50 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 					elem = ir.TypUint32
 				}
 			} else {
-				rhs = "*" + e.nameOf(p)
+				if isScalarIR(e.regType[p]) {
+					rhs = e.nameOf(p)
+				} else {
+					rhs = "*" + e.nameOf(p)
+				}
 			}
 		} else {
 			base := e.nameOf(ins.Args[0])
 			idxa := e.arg(ins.Args[1], ir.TypInt)
 			idx := wrapInt(idxa)
 			baseT := e.regType[ins.Args[0]]
-			// element index only when load elem matches base element type
-			sameElem := e.elemIdx[ins.Args[0]] && (elem == baseT || (elem == ir.TypUint8 && (baseT == "" || baseT == ir.TypUint8)))
-			// Typed word arrays (u32/u64/int tables): always element index, never LE byte view.
-			wordArr := baseT == ir.TypUint64 || baseT == ir.TypUint32 || baseT == ir.TypInt || baseT == ir.TypInt64
-			if sameElem || (wordArr && (elem == baseT || elem == "" || elem == ir.TypUint64 || elem == ir.TypUint32)) {
+			stName0 := strings.TrimPrefix(strings.TrimPrefix(string(baseT), "[]"), "*")
+			if (e.isStructTypeName(stName0) || e.findStruct(stName0) != nil) && !strings.HasPrefix(string(baseT), "[]") && !e.elemIdx[ins.Args[0]] {
+				rhs = base
+				elem = ir.TypeName("*" + exportName(stName0))
+				e.regPtr[ins.Dst] = true
+				e.scalarPtr[ins.Dst] = true
+				writeAssign(b, e, ins.Dst, rhs)
+				delete(e.constImm, ins.Dst)
+				return nil
+			}
+			if elem == "" && e.globalType != nil && isGlobalName(e.m, base) && !e.declared[ins.Args[0]] && !e.isParam[ins.Args[0]] {
+				if gt, ok := e.globalType[base]; ok && gt != "" {
+					elem = gt
+				}
+			}
+			isByteSlice := base == "key" || baseT == ir.TypUint8 || baseT == ir.TypeName("[]byte") || (isSliceType(baseT) && strings.Contains(string(baseT), "byte"))
+			// element index only when load elem matches base element type and not a byte slice loaded as words
+			sameElem := !isByteSlice && e.elemIdx[ins.Args[0]] && (elem == baseT || (elem == ir.TypUint8 && (baseT == "" || baseT == ir.TypUint8)))
+			wordArr := (baseT == ir.TypUint64 || baseT == ir.TypUint32 || baseT == ir.TypInt || baseT == ir.TypInt64) && !isByteSlice
+			if e.scalarPtr[ins.Args[0]] || strings.HasPrefix(string(e.regType[ins.Args[0]]), "*") {
+				rhs = "*" + base
+			} else if sameElem || (wordArr && (elem == baseT || elem == "" || elem == ir.TypUint64 || elem == ir.TypUint32)) {
 				rhs = fmt.Sprintf("%s[%s]", base, idx)
+				stName := strings.TrimPrefix(string(elem), "*")
+				if e.isStructTypeName(stName) || e.findStruct(stName) != nil {
+					if !strings.HasPrefix(string(baseT), "[]") && !e.elemIdx[ins.Args[0]] {
+						rhs = base
+					} else {
+						rhs = fmt.Sprintf("&%s[%s]", base, idx)
+					}
+					elem = ir.TypeName("*" + stName)
+					e.regPtr[ins.Dst] = true
+				}
 				if elem == "" {
 					elem = baseT
 				}
@@ -1788,6 +3115,16 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 				}
 			} else {
 				rhs = fmt.Sprintf("%s[%s]", base, idx)
+				stName := strings.TrimPrefix(string(elem), "*")
+				if e.isStructTypeName(stName) || e.findStruct(stName) != nil {
+					if !strings.HasPrefix(string(baseT), "[]") && !e.elemIdx[ins.Args[0]] {
+						rhs = base
+					} else {
+						rhs = fmt.Sprintf("&%s[%s]", base, idx)
+					}
+					elem = ir.TypeName("*" + stName)
+					e.regPtr[ins.Dst] = true
+				}
 				if elem == "" {
 					elem = ir.TypUint8
 				}
@@ -1798,7 +3135,9 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 				}
 			}
 		}
-		e.regPtr[ins.Dst] = false
+		if !strings.HasPrefix(string(elem), "*") && !isSliceType(elem) && elem != ir.TypeName("[]byte") {
+			e.regPtr[ins.Dst] = false
+		}
 		delete(e.regName, ins.Dst)
 		e.regType[ins.Dst] = elem
 		writeAssign(b, e, ins.Dst, rhs)
@@ -1818,8 +3157,15 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 		}
 	case ir.OpStore:
 		elem := ins.Elem
+		if strings.HasPrefix(string(elem), "[]") {
+			elem = ir.TypeName(strings.TrimPrefix(string(elem), "[]"))
+		}
 		if t := e.regType[ins.Args[0]]; t != "" && t != ir.TypUint8 {
-			elem = t
+			if strings.HasPrefix(string(t), "[]") {
+				elem = ir.TypeName(strings.TrimPrefix(string(t), "[]"))
+			} else {
+				elem = t
+			}
 		}
 		if (elem == "" || elem == ir.TypUint8) && e.regType[ins.Args[0]] != "" && e.regType[ins.Args[0]] != ir.TypUint8 {
 			if t := e.regType[ins.Args[len(ins.Args)-1]]; t != "" && t != ir.TypUint8 {
@@ -1829,11 +3175,33 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 		if elem == "" {
 			elem = e.regType[ins.Args[0]]
 		}
+		if strings.HasPrefix(string(elem), "[]") {
+			elem = ir.TypeName(strings.TrimPrefix(string(elem), "[]"))
+		}
+		if elem == "byte" {
+			elem = ir.TypUint8
+		}
 		// typed []T (elemIdx or regType wide on ptr param) → element assign; []byte + wide → LE
 		typedSlice := e.elemIdx[ins.Args[0]] || e.regType[ins.Args[0]] == ir.TypUint32 || e.regType[ins.Args[0]] == ir.TypUint64
 		baseNm := e.nameOf(ins.Args[0])
+		if ins.Sym == "slice_ptr_advance" && len(ins.Args) == 2 {
+			e.line(b, "*%s = (*%s)[%s:]\n", baseNm, baseNm, e.arg(ins.Args[1], ir.TypInt))
+			return nil
+		}
+		if strings.HasPrefix(string(e.regType[ins.Args[0]]), "*[]") {
+			if len(ins.Args) == 2 {
+				valStr := e.arg(ins.Args[1], ir.TypeName(strings.TrimPrefix(string(e.regType[ins.Args[0]]), "*")))
+				e.line(b, "*%s = %s\n", baseNm, valStr)
+				return nil
+			}
+			idx := wrapInt(e.arg(ins.Args[1], ir.TypInt))
+			e.line(b, "(*%s)[%s] = %s\n", baseNm, idx, e.arg(ins.Args[2], elem))
+			return nil
+		}
 		if len(ins.Args) == 2 {
-			if e.scalarPtr[ins.Args[0]] {
+			if isScalarIR(e.regType[ins.Args[0]]) && !e.regPtr[ins.Args[0]] && !e.scalarPtr[ins.Args[0]] {
+				e.line(b, "%s = %s\n", baseNm, e.arg(ins.Args[1], elem))
+			} else if e.scalarPtr[ins.Args[0]] {
 				e.line(b, "*%s = %s\n", baseNm, e.arg(ins.Args[1], elem))
 			} else if !typedSlice && elem == ir.TypUint64 {
 				e.line(b, "binary.LittleEndian.PutUint64(%s[0:], %s)\n", baseNm, e.arg(ins.Args[1], ir.TypUint64))
@@ -1845,22 +3213,103 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 				e.line(b, "%s[0] = %s\n", baseNm, e.arg(ins.Args[1], elem))
 			}
 		} else if len(ins.Args) == 3 {
-			idx := wrapInt(e.arg(ins.Args[1], ir.TypInt))
-			// idx is already byte-scaled by front for wide stores on []byte
-			if !typedSlice && elem == ir.TypUint64 {
-				e.line(b, "binary.LittleEndian.PutUint64(%s[%s:], %s)\n", baseNm, idx, e.arg(ins.Args[2], ir.TypUint64))
-				e.needBinary = true
-			} else if !typedSlice && elem == ir.TypUint32 {
-				e.line(b, "binary.LittleEndian.PutUint32(%s[%s:], %s)\n", baseNm, idx, e.arg(ins.Args[2], ir.TypUint32))
-				e.needBinary = true
+			if isScalarIR(e.regType[ins.Args[0]]) && !e.regPtr[ins.Args[0]] && !e.scalarPtr[ins.Args[0]] {
+				e.line(b, "%s = %s\n", baseNm, e.arg(ins.Args[2], elem))
+			} else if e.scalarPtr[ins.Args[0]] {
+				e.line(b, "*%s = %s\n", baseNm, e.arg(ins.Args[2], elem))
 			} else {
-				e.line(b, "%s[%s] = %s\n", baseNm, idx, e.arg(ins.Args[2], elem))
+				idx := wrapInt(e.arg(ins.Args[1], ir.TypInt))
+				// idx is already byte-scaled by front for wide stores on []byte
+				if !typedSlice && elem == ir.TypUint64 {
+					e.line(b, "binary.LittleEndian.PutUint64(%s[%s:], %s)\n", baseNm, idx, e.arg(ins.Args[2], ir.TypUint64))
+					e.needBinary = true
+				} else if !typedSlice && elem == ir.TypUint32 {
+					e.line(b, "binary.LittleEndian.PutUint32(%s[%s:], %s)\n", baseNm, idx, e.arg(ins.Args[2], ir.TypUint32))
+					e.needBinary = true
+				} else {
+					e.line(b, "%s[%s] = %s\n", baseNm, idx, e.arg(ins.Args[2], elem))
+				}
 			}
 		} else {
 			return fmt.Errorf("emit: store arity")
 		}
 		// kill CSE of loads from this base (chacha *a+=*b then *d^=*a must reload a)
 		killCSEBase(e, baseNm)
+	case ir.OpBreak:
+		e.lines(b, "break\n")
+	case ir.OpContinue:
+		if len(e.forPostStack) > 0 {
+			post := e.forPostStack[len(e.forPostStack)-1]
+			for _, pIns := range post {
+				if err := emitIns(b, e, pIns, nil, 0); err != nil {
+					return err
+				}
+			}
+		}
+		e.lines(b, "continue\n")
+	case ir.OpGoto:
+		e.lines(b, "goto "+sanitizeIdent(ins.Sym)+"\n")
+	case ir.OpLabel:
+		e.lines(b, sanitizeIdent(ins.Sym)+":\n")
+	case ir.OpVecLoad:
+		base := e.nameOf(ins.Args[0])
+		vtype := "archsimd.Uint64x4"
+		switch ins.Elem {
+		case ir.TypVecUint8x16:
+			vtype = "archsimd.Uint8x16"
+		case ir.TypVecUint8x32:
+			vtype = "archsimd.Uint8x32"
+		case ir.TypVecUint32x4:
+			vtype = "archsimd.Uint32x4"
+		case ir.TypVecUint32x8:
+			vtype = "archsimd.Uint32x8"
+		case ir.TypVecUint64x2:
+			vtype = "archsimd.Uint64x2"
+		case ir.TypVecUint64x4:
+			vtype = "archsimd.Uint64x4"
+		case ir.TypVecFloat32x4:
+			vtype = "archsimd.Float32x4"
+		case ir.TypVecFloat32x8:
+			vtype = "archsimd.Float32x8"
+		}
+		e.needUnsafe = true
+		if len(ins.Args) > 1 {
+			idx := wrapInt(e.arg(ins.Args[1], ir.TypInt))
+			writeAssign(b, e, ins.Dst, fmt.Sprintf("archsimd.Load%sSlice(%s[%s:])", strings.TrimPrefix(vtype, "archsimd."), base, idx))
+		} else {
+			writeAssign(b, e, ins.Dst, fmt.Sprintf("archsimd.Load%sSlice(%s)", strings.TrimPrefix(vtype, "archsimd."), base))
+		}
+		e.regType[ins.Dst] = ins.Elem
+	case ir.OpVecStore:
+		base := e.nameOf(ins.Args[0])
+		val := e.nameOf(ins.Args[len(ins.Args)-1])
+		if len(ins.Args) > 2 {
+			idx := wrapInt(e.arg(ins.Args[1], ir.TypInt))
+			e.line(b, "%s.StoreSlice(%s[%s:])\n", val, base, idx)
+		} else {
+			e.line(b, "%s.StoreSlice(%s)\n", val, base)
+		}
+	case ir.OpVecAdd:
+		writeAssign(b, e, ins.Dst, fmt.Sprintf("%s.Add(%s)", e.nameOf(ins.Args[0]), e.nameOf(ins.Args[1])))
+		e.regType[ins.Dst] = e.regType[ins.Args[0]]
+	case ir.OpVecSub:
+		writeAssign(b, e, ins.Dst, fmt.Sprintf("%s.Sub(%s)", e.nameOf(ins.Args[0]), e.nameOf(ins.Args[1])))
+		e.regType[ins.Dst] = e.regType[ins.Args[0]]
+	case ir.OpVecMul:
+		writeAssign(b, e, ins.Dst, fmt.Sprintf("%s.Mul(%s)", e.nameOf(ins.Args[0]), e.nameOf(ins.Args[1])))
+		e.regType[ins.Dst] = e.regType[ins.Args[0]]
+	case ir.OpVecFMA:
+		writeAssign(b, e, ins.Dst, fmt.Sprintf("%s.FMA(%s, %s)", e.nameOf(ins.Args[0]), e.nameOf(ins.Args[1]), e.nameOf(ins.Args[2])))
+		e.regType[ins.Dst] = e.regType[ins.Args[0]]
+	case ir.OpVecCmpEq:
+		writeAssign(b, e, ins.Dst, fmt.Sprintf("%s.Equal(%s)", e.nameOf(ins.Args[0]), e.nameOf(ins.Args[1])))
+		e.regType[ins.Dst] = e.regType[ins.Args[0]]
+	case ir.OpVecToBits:
+		writeAssign(b, e, ins.Dst, fmt.Sprintf("%s.ToBits()", e.nameOf(ins.Args[0])))
+		e.regType[ins.Dst] = ir.TypUint64
+	case ir.OpVecReduceSum:
+		writeAssign(b, e, ins.Dst, fmt.Sprintf("%s.ReduceSum()", e.nameOf(ins.Args[0])))
+		e.regType[ins.Dst] = ir.TypFloat32
 	case ir.OpReturn:
 		e.lines(b, "return")
 		if len(ins.Args) > 0 {
@@ -1873,8 +3322,34 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 				ctx = e.regType[ins.Args[0]]
 			}
 			n := e.nameOf(ins.Args[0])
+			if strings.HasPrefix(string(ctx), "*") && !strings.HasPrefix(n, "&") && !strings.HasPrefix(n, "nil") {
+				if !e.scalarPtr[ins.Args[0]] && !strings.HasPrefix(string(e.regType[ins.Args[0]]), "*") && !isStructType(string(e.regType[ins.Args[0]]), e.structs) && !e.isStructTypeName(string(e.regType[ins.Args[0]])) {
+					if isSliceType(e.regType[ins.Args[0]]) || strings.Contains(n, "properties") || e.regPtr[ins.Args[0]] {
+						b.WriteString(fmt.Sprintf("&%s[0]", n))
+						b.WriteString("\n")
+						break
+					}
+				}
+			}
+			if (ctx == ir.TypeName("[]byte") || ctx == ir.TypUint8) && (strings.HasPrefix(string(e.regType[ins.Args[0]]), "*") || e.scalarPtr[ins.Args[0]] || e.isStructTypeName(string(e.regType[ins.Args[0]]))) {
+				if strings.HasPrefix(n, "nil") {
+					b.WriteString("nil\n")
+					break
+				}
+				e.needUnsafe = true
+				b.WriteString(fmt.Sprintf("unsafe.Slice((*byte)(unsafe.Pointer(%s)), 1)\n", n))
+				break
+			}
 			if _, ok := e.constImm[ins.Args[0]]; ok {
 				b.WriteString(e.arg(ins.Args[0], ctx))
+			} else if ctx == ir.TypString && e.regType[ins.Args[0]] != ir.TypString {
+				b.WriteString(fmt.Sprintf("string(%s)", n))
+			} else if ctx == ir.TypBool && e.regType[ins.Args[0]] != ir.TypBool {
+				if isBoolExpr(n) {
+					b.WriteString(stripBoolNe0(n))
+				} else {
+					b.WriteString(fmt.Sprintf("%s != 0", n))
+				}
 			} else if ctx != "" && ctx != ir.TypInt && !e.regPtr[ins.Args[0]] {
 				// force cast to result type
 				b.WriteString(fmt.Sprintf("%s(%s)", goType(ctx), n))
@@ -1885,16 +3360,64 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 		b.WriteString("\n")
 	case ir.OpCall:
 		if ins.Sym == "__select" && len(ins.Args) == 3 {
-			ctx := e.regType[ins.Args[1]]
+			var ctx ir.TypeName
+			if t1 := e.regType[ins.Args[1]]; t1 != "" && !e.regPtr[ins.Args[1]] && !isStructType(string(t1), e.structs) {
+				ctx = t1
+			} else if t2 := e.regType[ins.Args[2]]; t2 != "" && !e.regPtr[ins.Args[2]] && !isStructType(string(t2), e.structs) {
+				ctx = t2
+			} else if t1 != "" {
+				ctx = t1
+			} else if t2 != "" {
+				ctx = t2
+			}
 			if ctx == "" {
-				ctx = e.regType[ins.Args[2]]
+				ctx = e.declType[ins.Dst]
+			}
+			if ctx == "" {
+				ctx = e.regType[ins.Dst]
+			}
+			if ctx == "" {
+				ctx = e.hoistTypes[ins.Dst]
+			}
+			if ctx == "" && e.f.Result != "" && e.f.Result != ir.TypVoid {
+				ctx = e.f.Result
 			}
 			if ctx == "" {
 				ctx = e.dom
 			}
-			rhs := fmt.Sprintf("func() %s { if (%s) != 0 { return %s }; return %s }()", goType(ctx), e.arg(ins.Args[0], ir.TypInt), e.arg(ins.Args[1], ctx), e.arg(ins.Args[2], ctx))
-			writeAssign(b, e, ins.Dst, rhs)
+			if e.scalarPtr[ins.Args[1]] || e.scalarPtr[ins.Args[2]] || (isStructType(string(ctx), e.structs) && (e.regPtr[ins.Args[1]] || e.regPtr[ins.Args[2]])) {
+				if !strings.HasPrefix(string(ctx), "*") {
+					ctx = ir.TypeName("*" + string(ctx))
+				}
+			}
+			var condStr string
+			if e.regType[ins.Args[0]] == ir.TypBool {
+				condStr = e.nameOf(ins.Args[0])
+			} else {
+				condStr = e.arg(ins.Args[0], ir.TypInt)
+				if isBoolExpr(condStr) {
+					condStr = stripBoolNe0(condStr)
+				} else if e.scalarPtr[ins.Args[0]] || strings.HasPrefix(string(e.regType[ins.Args[0]]), "*") || isStructType(string(e.regType[ins.Args[0]]), e.structs) {
+					condStr = condStr + " != nil"
+				} else if isSliceType(e.regType[ins.Args[0]]) || e.regPtr[ins.Args[0]] {
+					condStr = "len(" + condStr + ") != 0"
+				} else {
+					condStr = "(" + condStr + ") != 0"
+				}
+			}
+			if e.regPtr[ins.Args[1]] && !e.scalarPtr[ins.Args[1]] && !strings.HasPrefix(string(ctx), "*") {
+				e.regPtr[ins.Dst] = true
+				if !isSliceType(ctx) && !strings.HasPrefix(string(ctx), "[]") {
+					ctx = ir.TypeName("[]" + goType(ctx))
+				}
+			} else if strings.HasPrefix(string(ctx), "*") || e.isStructTypeName(string(ctx)) {
+				e.scalarPtr[ins.Dst] = true
+				e.regPtr[ins.Dst] = true
+			}
 			e.regType[ins.Dst] = ctx
+			e.hoistTypes[ins.Dst] = ctx
+			rhs := fmt.Sprintf("func() %s { if %s { return %s }; return %s }()", goType(ctx), condStr, e.arg(ins.Args[1], ctx), e.arg(ins.Args[2], ctx))
+			writeAssign(b, e, ins.Dst, rhs)
 			delete(e.constImm, ins.Dst)
 			return nil
 		}
@@ -1908,39 +3431,58 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			if op == "_" || op == "" {
 				op = "=="
 			}
-			// pointer vs 0/NULL
-			if e.regPtr[ins.Args[0]] || e.regPtr[ins.Args[1]] {
+			// pointer or string vs 0/NULL
+			if e.regPtr[ins.Args[0]] || e.regPtr[ins.Args[1]] || e.regType[ins.Args[0]] == ir.TypString || e.regType[ins.Args[1]] == ir.TypString {
 				var pside, zside ir.Value
-				if e.regPtr[ins.Args[0]] {
+				if e.regPtr[ins.Args[0]] || e.regType[ins.Args[0]] == ir.TypString {
 					pside, zside = ins.Args[0], ins.Args[1]
 				} else {
 					pside, zside = ins.Args[1], ins.Args[0]
 				}
 				pn := e.nameOf(pside)
-				// C NULL check on []byte / slices
+				nilLit := "nil"
+				if e.regType[pside] == ir.TypString {
+					nilLit = `""`
+				}
+				// C NULL check on []byte / slices / strings
 				var rhs string
-				if isUsedAsCond(e.f, ins.Dst) || e.forceCondBool {
+				if isUsedAsCond(e.f, ins.Dst) || e.hoistTypes[ins.Dst] == ir.TypBool || e.declType[ins.Dst] == ir.TypBool || e.forceCondBool {
 					switch op {
 					case "==":
-						rhs = fmt.Sprintf("%s == nil", pn)
+						rhs = fmt.Sprintf("%s == %s", pn, nilLit)
 					case "!=":
-						rhs = fmt.Sprintf("%s != nil", pn)
+						rhs = fmt.Sprintf("%s != %s", pn, nilLit)
 					default:
 						rhs = "true"
 					}
 					writeAssign(b, e, ins.Dst, rhs)
 					e.regType[ins.Dst] = ir.TypBool
 				} else {
+					retType := "int"
+					outTyp := ir.TypInt
+					if dstType := e.hoistTypes[ins.Dst]; dstType != "" {
+						retType = goType(dstType)
+						outTyp = dstType
+					} else if dstType := e.declType[ins.Dst]; dstType != "" {
+						retType = goType(dstType)
+						outTyp = dstType
+					}
+					ret1 := "1"
+					ret0 := "0"
+					if retType == "bool" {
+						ret1 = "true"
+						ret0 = "false"
+					}
 					switch op {
 					case "==":
-						rhs = fmt.Sprintf("func() int { if %s == nil { return 1 }; return 0 }()", pn)
+						rhs = fmt.Sprintf("func() %s { if %s == %s { return %s }; return %s }()", retType, pn, nilLit, ret1, ret0)
 					case "!=":
-						rhs = fmt.Sprintf("func() int { if %s != nil { return 1 }; return 0 }()", pn)
+						rhs = fmt.Sprintf("func() %s { if %s != %s { return %s }; return %s }()", retType, pn, nilLit, ret1, ret0)
 					default:
-						rhs = "1"
+						rhs = ret1
 					}
 					writeAssign(b, e, ins.Dst, rhs)
-					e.regType[ins.Dst] = ir.TypInt
+					e.regType[ins.Dst] = outTyp
 				}
 				_ = zside
 				delete(e.constImm, ins.Dst)
@@ -1953,9 +3495,15 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			if ctx == "" {
 				ctx = e.dom
 			}
+			if ctx == ir.TypString && !e.regPtr[ins.Args[0]] && !e.regPtr[ins.Args[1]] && e.regType[ins.Args[0]] != ir.TypString && e.regType[ins.Args[1]] != ir.TypString {
+				ctx = ir.TypInt
+			}
+			if op == "&&" || op == "||" {
+				ctx = ir.TypBool
+			}
 			l, r := e.arg(ins.Args[0], ctx), e.arg(ins.Args[1], ctx)
 			var rhs string
-			if isUsedAsCond(e.f, ins.Dst) || e.forceCondBool {
+			if isUsedAsCond(e.f, ins.Dst) || e.hoistTypes[ins.Dst] == ir.TypBool || e.declType[ins.Dst] == ir.TypBool || e.forceCondBool {
 				if (op == "!=" || op == "==") && (r == "0" || isZeroLit(r)) && (e.regType[ins.Args[0]] == ir.TypBool || isBoolExpr(l)) {
 					if op == "!=" {
 						rhs = fmt.Sprintf("(%s)", l)
@@ -1977,20 +3525,102 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 				delete(e.constImm, ins.Dst)
 				return nil
 			} else {
+				retType := "int"
+				outTyp := ir.TypInt
+				if dstType := e.hoistTypes[ins.Dst]; dstType != "" && dstType != ir.TypBool {
+					retType = goType(dstType)
+					outTyp = dstType
+				} else if dstType := e.declType[ins.Dst]; dstType != "" && dstType != ir.TypBool {
+					retType = goType(dstType)
+					outTyp = dstType
+				}
+				ret1 := "1"
+				ret0 := "0"
+				if retType == "bool" {
+					ret1 = "true"
+					ret0 = "false"
+				}
 				switch op {
 				case "&&":
-					rhs = fmt.Sprintf("func() int { if %s && %s { return 1 }; return 0 }()", e.toBoolStr(ins.Args[0], l), e.toBoolStr(ins.Args[1], r))
+					rhs = fmt.Sprintf("func() %s { if %s && %s { return %s }; return %s }()", retType, e.toBoolStr(ins.Args[0], l), e.toBoolStr(ins.Args[1], r), ret1, ret0)
 				case "||":
-					rhs = fmt.Sprintf("func() int { if %s || %s { return 1 }; return 0 }()", e.toBoolStr(ins.Args[0], l), e.toBoolStr(ins.Args[1], r))
+					rhs = fmt.Sprintf("func() %s { if %s || %s { return %s }; return %s }()", retType, e.toBoolStr(ins.Args[0], l), e.toBoolStr(ins.Args[1], r), ret1, ret0)
 				default:
-					rhs = fmt.Sprintf("func() int { if (%s) %s (%s) { return 1 }; return 0 }()", l, op, r)
+					rhs = fmt.Sprintf("func() %s { if (%s) %s (%s) { return %s }; return %s }()", retType, l, op, r, ret1, ret0)
 				}
 				writeAssign(b, e, ins.Dst, rhs)
-				e.regType[ins.Dst] = ir.TypInt
+				e.regType[ins.Dst] = outTyp
 				delete(e.constImm, ins.Dst)
 				return nil
 			}
 		}
+		// Map GCC/Clang builtins to math/bits
+		switch ins.Sym {
+		case "__builtin_clz":
+			if len(ins.Args) == 1 {
+				rhs := fmt.Sprintf("bits.LeadingZeros32(uint32(%s))", e.arg(ins.Args[0], ir.TypUint32))
+				writeAssign(b, e, ins.Dst, rhs)
+				e.regType[ins.Dst] = ir.TypInt
+				return nil
+			}
+		case "__builtin_clzll":
+			if len(ins.Args) == 1 {
+				rhs := fmt.Sprintf("bits.LeadingZeros64(uint64(%s))", e.arg(ins.Args[0], ir.TypUint64))
+				writeAssign(b, e, ins.Dst, rhs)
+				e.regType[ins.Dst] = ir.TypInt
+				return nil
+			}
+		case "__builtin_ctz":
+			if len(ins.Args) == 1 {
+				rhs := fmt.Sprintf("bits.TrailingZeros32(uint32(%s))", e.arg(ins.Args[0], ir.TypUint32))
+				writeAssign(b, e, ins.Dst, rhs)
+				e.regType[ins.Dst] = ir.TypInt
+				return nil
+			}
+		case "__builtin_ctzll":
+			if len(ins.Args) == 1 {
+				rhs := fmt.Sprintf("bits.TrailingZeros64(uint64(%s))", e.arg(ins.Args[0], ir.TypUint64))
+				writeAssign(b, e, ins.Dst, rhs)
+				e.regType[ins.Dst] = ir.TypInt
+				return nil
+			}
+		case "__builtin_popcount":
+			if len(ins.Args) == 1 {
+				rhs := fmt.Sprintf("bits.OnesCount32(uint32(%s))", e.arg(ins.Args[0], ir.TypUint32))
+				writeAssign(b, e, ins.Dst, rhs)
+				e.regType[ins.Dst] = ir.TypInt
+				return nil
+			}
+		case "__builtin_popcountll":
+			if len(ins.Args) == 1 {
+				rhs := fmt.Sprintf("bits.OnesCount64(uint64(%s))", e.arg(ins.Args[0], ir.TypUint64))
+				writeAssign(b, e, ins.Dst, rhs)
+				e.regType[ins.Dst] = ir.TypInt
+				return nil
+			}
+		case "__builtin_bswap16":
+			if len(ins.Args) == 1 {
+				rhs := fmt.Sprintf("bits.ReverseBytes16(uint16(%s))", e.arg(ins.Args[0], ir.TypUint16))
+				writeAssign(b, e, ins.Dst, rhs)
+				e.regType[ins.Dst] = ir.TypUint16
+				return nil
+			}
+		case "__builtin_bswap32":
+			if len(ins.Args) == 1 {
+				rhs := fmt.Sprintf("bits.ReverseBytes32(uint32(%s))", e.arg(ins.Args[0], ir.TypUint32))
+				writeAssign(b, e, ins.Dst, rhs)
+				e.regType[ins.Dst] = ir.TypUint32
+				return nil
+			}
+		case "__builtin_bswap64":
+			if len(ins.Args) == 1 {
+				rhs := fmt.Sprintf("bits.ReverseBytes64(uint64(%s))", e.arg(ins.Args[0], ir.TypUint64))
+				writeAssign(b, e, ins.Dst, rhs)
+				e.regType[ins.Dst] = ir.TypUint64
+				return nil
+			}
+		}
+
 		args := make([]string, len(ins.Args))
 		callSym := baseCallSym(ins.Sym)
 		var callee *ir.Func
@@ -1998,6 +3628,9 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			callee = e.callees[callSym]
 			if callee == nil {
 				callee = e.callees[strings.ToLower(callSym)]
+			}
+			if callee == nil {
+				callee = e.callees[exportName(callSym)]
 			}
 		}
 		// crypto_wipe: range zeroing for slices/arrays, skip for struct pointers
@@ -2036,12 +3669,30 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			if callee != nil && i < len(callee.Params) {
 				p := callee.Params[i]
 				ctx := p.Type
-				if p.StructName != "" || (p.Ptr && isStructTypeName(string(p.Type))) {
-					argStr := e.arg(a, ctx)
-					if !strings.HasPrefix(argStr, "&") && !e.regPtr[a] {
-						argStr = "&" + argStr
+				if (e.isStringReg[a] || e.regType[a] == ir.TypString || strings.HasPrefix(e.nameOf(a), "__str_")) &&
+					(p.Type == ir.TypUint8 || p.Type == ir.TypString || p.Ptr || p.ArrayLen > 0) {
+					args[i] = "[]byte(" + e.nameOf(a) + ")"
+					continue
+				}
+				if p.StructName != "" || e.isStructTypeName(string(p.Type)) {
+					if imm, ok := e.constImm[a]; ok && imm == 0 {
+						args[i] = "nil"
+						continue
 					}
-					args[i] = argStr
+					stName := p.StructName
+					if stName == "" {
+						stName = string(p.Type)
+					}
+					if p.Ptr {
+						if callee != nil && !ptrUsedAsScalarOnly(callee, p.Reg, e.callees) {
+							ctx = ir.TypeName("[]" + exportName(stName))
+						} else {
+							ctx = ir.TypeName("*" + exportName(stName))
+						}
+					} else {
+						ctx = ir.TypeName(exportName(stName))
+					}
+					args[i] = e.arg(a, ctx)
 					continue
 				}
 				// fe étape 2 : le callee attend *[N]int32 — passer le pointeur
@@ -2057,7 +3708,7 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 					}
 					continue
 				}
-				if p.Ptr || p.ArrayLen > 0 {
+				if p.Ptr || p.ArrayLen > 0 || isSliceType(p.Type) || strings.HasPrefix(string(p.Type), "[]") {
 					// NULL / 0 → nil for slice params
 					if imm, ok := e.constImm[a]; ok && imm == 0 {
 						if p.ArrayLen == 0 && (p.Type == ir.TypUint32 || p.Type == ir.TypUint64) {
@@ -2068,13 +3719,17 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 						continue
 					}
 					// callee wants *T only when that param is scalar-only in callee body
-					if p.ArrayLen == 0 && (p.Type == ir.TypUint32 || p.Type == ir.TypUint64) &&
-						ptrUsedAsScalarOnly(callee, p.Reg) {
-						if e.scalarPtr[a] {
-							args[i] = e.nameOf(a)
+					if p.ArrayLen == 0 && (p.Type == ir.TypUint32 || p.Type == ir.TypUint64 || p.Type == ir.TypInt32 || p.Type == ir.TypInt64 || p.Type == ir.TypFloat32 || p.Type == ir.TypFloat64 || p.Type == ir.TypBool || p.Type == ir.TypInt || p.Type == "") &&
+						ptrUsedAsScalarOnly(callee, p.Reg, e.callees) {
+						n := e.nameOf(a)
+						if e.isAddrOf[a] && !strings.HasPrefix(n, "&") {
+							args[i] = "&" + n
+						} else if e.scalarPtr[a] {
+							args[i] = n
 						} else {
-							n := e.nameOf(a)
-							if strings.HasPrefix(n, "&") {
+							if n == "0" || n == "nil" || isIntLit(n) {
+								args[i] = "nil"
+							} else if strings.HasPrefix(n, "&") {
 								args[i] = n
 							} else if e.regPtr[a] || e.elemIdx[a] {
 								args[i] = "&" + n + "[0]"
@@ -2084,15 +3739,83 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 						}
 						continue
 					}
-					ctx = e.regType[a]
+					if p.Ptr && (p.Type == ir.TypUint8 || p.Type == "" || p.Type == ir.TypInt || p.Type == ir.TypString) {
+						n := e.nameOf(a)
+						if strings.HasPrefix(n, "__str_") || e.regType[a] == ir.TypString || e.isStringReg[a] {
+							args[i] = "[]byte(" + n + ")"
+							continue
+						}
+						stName := string(e.regType[a])
+						if st := e.findStruct(stName); st != nil {
+							if len(st.Fields) == 1 && st.Fields[0].ArrayLen > 0 {
+								fld := exportName(st.Fields[0].Name)
+								args[i] = fmt.Sprintf("%s.%s[:]", strings.TrimPrefix(n, "&"), fld)
+								continue
+							}
+						}
+					}
+					if p.Ptr && (p.StructName != "" || isStructType(string(p.Type), e.structs)) {
+						stName := p.StructName
+						if stName == "" {
+							stName = string(p.Type)
+						}
+						ctx = ir.TypeName("*" + exportName(stName))
+					} else if p.Ptr && (p.Type == ir.TypUint8 || p.Type == "") {
+						ctx = ir.TypeName("[]byte")
+					} else if p.Ptr && (p.Type == ir.TypInt64 || p.Type == ir.TypUint64 || p.Type == ir.TypInt32 || p.Type == ir.TypUint32) {
+						ctx = ir.TypeName("[]" + goType(p.Type))
+					} else if p.Type != "" && p.Type != ir.TypVoid {
+						ctx = p.Type
+					} else {
+						ctx = e.regType[a]
+					}
 					if ctx == "" {
 						ctx = e.dom
+					}
+					n := e.nameOf(a)
+					if ctx == "[]byte" && (e.regType[a] == ir.TypInt || e.regType[a] == ir.TypInt32 || e.regType[a] == ir.TypUint32 || e.regType[a] == ir.TypInt64 || e.regType[a] == ir.TypUint64 || strings.HasPrefix(string(e.regType[a]), "[]int") || strings.HasPrefix(string(e.regType[a]), "[]uint")) {
+						e.needUnsafe = true
+						root := e.rootOf(a)
+						rootNm := e.nameOf(root)
+						if strings.HasPrefix(rootNm, "&") {
+							rootNm = strings.TrimPrefix(rootNm, "&")
+						}
+						if idx := strings.Index(n, "["); idx > 0 && strings.HasSuffix(n, ":]") {
+							subIdx := n[idx+1 : len(n)-2]
+							args[i] = fmt.Sprintf("unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(%s))), len(%s)*4)[%s:]", rootNm, rootNm, subIdx)
+						} else {
+							args[i] = fmt.Sprintf("unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(%s))), len(%s)*4)", rootNm, rootNm)
+						}
+						continue
+					}
+					if strings.Contains(n, "[") && !strings.HasSuffix(n, "[:]") && !strings.HasPrefix(n, "&") && !isIntLit(n) {
+						args[i] = n + "[:]"
+						continue
+					}
+					if (isSliceType(ctx) || strings.HasPrefix(string(ctx), "[]")) && !strings.HasSuffix(n, "[:]") && !strings.HasPrefix(n, "&") && !strings.HasPrefix(string(e.regType[a]), "[]") {
+						args[i] = n + "[:]"
+						continue
 					}
 					args[i] = e.arg(a, ctx)
 					continue
 				}
+				if p.Type == ir.TypString {
+					n := e.nameOf(a)
+					if !strings.HasPrefix(n, "[]byte") && !strings.HasSuffix(n, "[:]") {
+						args[i] = "[]byte(" + n + ")"
+						continue
+					}
+				}
 				args[i] = e.arg(a, ctx)
 			} else {
+				if e.isStringReg[a] || e.regType[a] == ir.TypString || strings.HasPrefix(e.nameOf(a), "__str_") {
+					args[i] = "[]byte(" + e.nameOf(a) + ")"
+					continue
+				}
+				if imm, ok := e.constImm[a]; ok {
+					args[i] = strconv.FormatInt(imm, 10)
+					continue
+				}
 				// prefer arg's own type to avoid bogus uint8(count)
 				ctx := e.regType[a]
 				if ctx == "" {
@@ -2107,7 +3830,7 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 		}
 		sym := resolveGoName(e, callSym)
 		// libc-ish builtins without harvested body
-		if bultin := emitBuiltinCall(callSym, args); bultin != "" {
+		if bultin := emitBuiltinCall(e, ins, callSym, args); bultin != "" {
 			call := bultin
 			low := strings.ToLower(callSym)
 			voidBuiltin := low == "memset" || low == "memcpy" || low == "memmove"
@@ -2121,10 +3844,16 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 				}
 				return nil
 			}
-			// strchr returns []byte (nullable slice)
-			if low == "strchr" {
-				e.regType[ins.Dst] = ir.TypUint8
+			// strchr/memchr returns []byte (nullable slice)
+			if low == "strchr" || low == "memchr" {
+				e.regType[ins.Dst] = ir.TypeName("[]byte")
 				e.regPtr[ins.Dst] = true
+			} else if low == "memcmp" || low == "strcmp" || low == "strncmp" || low == "tolower" || low == "toupper" {
+				e.regType[ins.Dst] = ir.TypInt
+			} else if low == "strlen" || low == "strspn" || low == "strcspn" {
+				e.regType[ins.Dst] = ir.TypUint64
+			} else if low == "fabs" || low == "sqrt" || low == "sin" || low == "cos" {
+				e.regType[ins.Dst] = ir.TypFloat64
 			} else {
 				e.regType[ins.Dst] = e.dom
 			}
@@ -2144,6 +3873,13 @@ func emitIns(b *strings.Builder, e *env, ins ir.Instr, ss []ir.Stmt, stmtIdx int
 			retType = callee.Result
 		} else if callee, ok := e.callees[strings.ToLower(callSym)]; ok && callee.Result != "" && callee.Result != ir.TypVoid {
 			retType = callee.Result
+		} else if callee, ok := e.callees[exportName(callSym)]; ok && callee.Result != "" && callee.Result != ir.TypVoid {
+			retType = callee.Result
+		} else if strings.Contains(strings.ToLower(callSym), "lookup") {
+			retType = ir.TypUint8
+		}
+		if retType == ir.TypeName("[]byte") || retType == ir.TypeName("[]uint8") || strings.HasPrefix(string(retType), "[]") {
+			e.regPtr[ins.Dst] = true
 		}
 		e.regType[ins.Dst] = retType
 		writeAssign(b, e, ins.Dst, call)
@@ -2159,9 +3895,11 @@ func writeAssign(b *strings.Builder, e *env, dst ir.Value, rhs string) {
 		return
 	}
 	orig := rhs
-	// CSE: rewrite rhs to prior name holding same pure expr
-	if prev, ok := e.cseExpr[rhs]; ok && prev != "" {
-		rhs = prev
+	// CSE: rewrite rhs to prior name holding same pure expr (never for literals)
+	if !isIntLit(rhs) && rhs != "nil" && rhs != "0" && rhs != "1" && rhs != "true" && rhs != "false" && rhs != `""` {
+		if prev, ok := e.cseExpr[rhs]; ok && prev != "" {
+			rhs = prev
+		}
 	}
 	// single-write copy of single-write (or non-vreg) → pure alias, no emit
 	if canPureAlias(e, dst, rhs) {
@@ -2172,12 +3910,29 @@ func writeAssign(b *strings.Builder, e *env, dst ir.Value, rhs string) {
 	nm := e.nameOf(dst)
 	if e.hoist {
 		if e.hoistTypes != nil {
-			if t := e.regType[dst]; t != "" {
-				e.hoistTypes[dst] = t
+			t := e.regType[dst]
+			if isUsedAsCond(e.f, dst) {
+				t = ir.TypBool
+			} else if t == "" {
+				if isBoolExpr(rhs) {
+					t = ir.TypBool
+				} else {
+					t = e.dom
+				}
+			}
+			if t == "" {
+				t = ir.TypInt
+			}
+			e.hoistTypes[dst] = t
+			if isScalarIR(t) {
+				delete(e.regPtr, dst)
+				delete(e.elemIdx, dst)
 			}
 		}
 		// track CSE/name so later hoist sees aliases
-		e.cseExpr[orig] = nm
+		if !isIntLit(orig) && orig != "nil" && orig != "0" && orig != "1" && orig != "true" && orig != "false" && orig != `""` {
+			e.cseExpr[orig] = nm
+		}
 		return
 	}
 	if rhs == nm {
@@ -2197,6 +3952,14 @@ func writeAssign(b *strings.Builder, e *env, dst ir.Value, rhs string) {
 		e.declared[dst] = true
 		e.emitted[dst] = true
 		e.regName[dst] = nm
+		if t := e.regType[dst]; t != "" && t != ir.TypInt && t != ir.TypBool && isPrimitiveGoType(goType(t)) {
+			if strings.Contains(rhs, "<<") || strings.Contains(rhs, ">>") {
+				gt := goType(t)
+				if !strings.HasPrefix(rhs, gt+"(") {
+					rhs = fmt.Sprintf("%s(%s)", gt, rhs)
+				}
+			}
+		}
 		b.WriteString(rhs)
 		b.WriteString("\n")
 		if e.f != nil && !isRead(dst, e.f.Stmts) {
@@ -2222,11 +3985,136 @@ func writeAssign(b *strings.Builder, e *env, dst ir.Value, rhs string) {
 	e.cseExpr[orig] = nm
 }
 
-// ptrUsedAsScalarOnly reports whether reg is only deref'd at [0] / *p (no index/slice).
-func ptrUsedAsScalarOnly(f *ir.Func, reg ir.Value) bool {
+func structParamFielded(f *ir.Func, reg ir.Value) bool {
 	if f == nil {
 		return false
 	}
+	var found bool
+	var walk func([]ir.Stmt)
+	walk = func(ss []ir.Stmt) {
+		for _, s := range ss {
+			check := func(ins ir.Instr) {
+				if ins.Op == ir.OpField || ins.Op == ir.OpFStore {
+					if len(ins.Args) >= 1 && ins.Args[0] == reg {
+						found = true
+					}
+				}
+			}
+			if s.Kind == ir.SKInstr {
+				check(s.Ins)
+			}
+			for _, ins := range s.ForInit {
+				check(ins)
+			}
+			for _, ins := range s.ForCondPrep {
+				check(ins)
+			}
+			for _, ins := range s.ForPost {
+				check(ins)
+			}
+			for _, ins := range s.SwitchPrep {
+				check(ins)
+			}
+			walk(s.ThenBody)
+			walk(s.ElseBody)
+			walk(s.ForBody)
+			walk(s.DoBody)
+			for _, c := range s.SwitchCases {
+				walk(c.Body)
+			}
+		}
+	}
+	f.EnsureStmts()
+	walk(f.Stmts)
+	return found
+}
+
+func loopIndexFromCond(s ir.Stmt, e *env) string {
+	cond := condStr(e, s)
+	cond = strings.TrimSpace(cond)
+	cond = strings.TrimPrefix(cond, "(")
+	for _, op := range []string{" < ", " <= ", " > ", " >= "} {
+		i := strings.Index(cond, op)
+		if i <= 0 {
+			continue
+		}
+		left := strings.TrimSpace(cond[:i])
+		if isSimpleIdent(left) {
+			return left
+		}
+	}
+	return ""
+}
+
+func ensureLoopIncrement(b *strings.Builder, e *env, s ir.Stmt, postStart int) {
+	if len(s.ForPost) == 0 {
+		return
+	}
+	idx := loopIndexFromCond(s, e)
+	if idx == "" {
+		return
+	}
+	post := ""
+	if postStart >= 0 && postStart <= b.Len() {
+		post = b.String()[postStart:]
+	}
+	if strings.Contains(post, idx) {
+		return
+	}
+	e.lines(b, idx+"++\n")
+}
+
+func forceLoopCounters(e *env, s ir.Stmt) {
+	note := func(v ir.Value) {
+		if v == ir.NoVal {
+			return
+		}
+		if !e.isParam[v] {
+			delete(e.regName, v)
+		}
+		delete(e.constImm, v)
+		delete(e.suppress, v)
+		e.noConstArg[v] = true
+	}
+	for _, ins := range s.ForPost {
+		switch ins.Op {
+		case ir.OpMov:
+			note(ins.Dst)
+		case ir.OpAdd, ir.OpSub:
+			note(ins.Dst)
+			if len(ins.Args) > 0 {
+				note(ins.Args[0])
+			}
+		}
+	}
+}
+
+func isStructParamScalarPtr(f *ir.Func, reg ir.Value, callees map[string]*ir.Func) bool {
+	if f != nil {
+		for _, ins := range f.Body {
+			if (ins.Op == ir.OpField || ins.Op == ir.OpFStore) && len(ins.Args) >= 1 && ins.Args[0] == reg {
+				return true
+			}
+		}
+	}
+	return ptrUsedAsScalarOnly(f, reg, callees)
+}
+
+// ptrUsedAsScalarOnly reports whether reg is only deref'd at [0] / *p (no index/slice).
+func ptrUsedAsScalarOnly(f *ir.Func, reg ir.Value, callees map[string]*ir.Func) bool {
+	return ptrUsedAsScalarOnlyVisited(f, reg, callees, map[string]bool{})
+}
+
+func ptrUsedAsScalarOnlyVisited(f *ir.Func, reg ir.Value, callees map[string]*ir.Func, visited map[string]bool) bool {
+	if f == nil {
+		return false
+	}
+	key := fmt.Sprintf("%s:%d", f.Name, int(reg))
+	if visited[key] {
+		return true
+	}
+	visited[key] = true
+	f.EnsureStmts()
 	// aliases via ptr+0 still ok; indexed load/store or ptr_add with non-zero → slice
 	var walk func([]ir.Stmt) bool
 	walk = func(ss []ir.Stmt) bool {
@@ -2235,19 +4123,47 @@ func ptrUsedAsScalarOnly(f *ir.Func, reg ir.Value) bool {
 				switch ins.Op {
 				case ir.OpLoad:
 					if len(ins.Args) >= 1 && baseAliased(ins.Args[0], reg, f) {
-						if len(ins.Args) >= 2 {
+						if len(ins.Args) >= 2 && !isConstZero(ins.Args[1], f) {
 							return false // indexed
 						}
 					}
 				case ir.OpStore:
 					if len(ins.Args) >= 1 && baseAliased(ins.Args[0], reg, f) {
-						if len(ins.Args) >= 3 {
+						if len(ins.Args) == 2 {
+							// scalar store: *p = val
+						} else if len(ins.Args) >= 3 && !isConstZero(ins.Args[1], f) {
 							return false // indexed store
 						}
 					}
 				case ir.OpAdd, ir.OpSub:
-					if len(ins.Args) >= 1 && baseAliased(ins.Args[0], reg, f) && ins.Sym == "ptr_add" {
+					if ins.Sym == "ptr_add" && len(ins.Args) >= 1 && baseAliased(ins.Args[0], reg, f) {
+						if len(ins.Args) >= 2 && !isConstZero(ins.Args[1], f) {
+							return false
+						}
+					}
+				case ir.OpFStore:
+					if len(ins.Args) >= 2 && baseAliased(ins.Args[1], reg, f) {
 						return false
+					}
+				case ir.OpCall:
+					if callees != nil {
+						if strings.Contains(strings.ToLower(ins.Sym), "wipe") || strings.Contains(strings.ToLower(ins.Sym), "memset") || strings.Contains(strings.ToLower(ins.Sym), "bzero") {
+							return true
+						}
+						callee := callees[ins.Sym]
+						if callee == nil {
+							callee = callees[strings.ToLower(ins.Sym)]
+						}
+						if callee != nil && callee != f {
+							for argIdx, argVal := range ins.Args {
+								if baseAliased(argVal, reg, f) && argIdx < len(callee.Params) {
+									calleeParam := callee.Params[argIdx]
+									if !ptrUsedAsScalarOnlyVisited(callee, calleeParam.Reg, callees, visited) {
+										return false
+									}
+								}
+							}
+						}
 					}
 				}
 				return true
@@ -2295,9 +4211,109 @@ func baseAliased(v, reg ir.Value, f *ir.Func) bool {
 	if v == reg {
 		return true
 	}
-	// cheap: only exact param match (ptr arithmetic creates new vregs checked via walk)
-	_ = f
+	if f == nil {
+		return false
+	}
+	visited := map[ir.Value]bool{v: true}
+	work := []ir.Value{v}
+	for len(work) > 0 {
+		cur := work[0]
+		work = work[1:]
+		if cur == reg {
+			return true
+		}
+		checkIns := func(ins ir.Instr) {
+			if ins.Dst == cur {
+				if (ins.Op == ir.OpMov || ((ins.Op == ir.OpAdd || ins.Op == ir.OpSub) && (ins.Sym == "ptr_add" || ins.Sym == "ptr_alias"))) && len(ins.Args) >= 1 {
+					baseArg := ins.Args[0]
+					if !visited[baseArg] {
+						visited[baseArg] = true
+						work = append(work, baseArg)
+					}
+				}
+				if ins.Op == ir.OpCall && (ins.Sym == "__select" || strings.HasPrefix(ins.Sym, "__ternary_")) && len(ins.Args) >= 3 {
+					for _, b := range []ir.Value{ins.Args[1], ins.Args[2]} {
+						if !visited[b] {
+							visited[b] = true
+							work = append(work, b)
+						}
+					}
+				}
+			}
+		}
+		for _, ins := range f.Body {
+			checkIns(ins)
+		}
+		var walk func([]ir.Stmt)
+		walk = func(ss []ir.Stmt) {
+			for _, s := range ss {
+				if s.Kind == ir.SKInstr {
+					checkIns(s.Ins)
+				}
+				for _, ins := range s.ForInit {
+					checkIns(ins)
+				}
+				for _, ins := range s.ForCondPrep {
+					checkIns(ins)
+				}
+				for _, ins := range s.ForPost {
+					checkIns(ins)
+				}
+				for _, ins := range s.SwitchPrep {
+					checkIns(ins)
+				}
+				walk(s.ThenBody)
+				walk(s.ElseBody)
+				walk(s.ForBody)
+				walk(s.DoBody)
+				for _, c := range s.SwitchCases {
+					walk(c.Body)
+				}
+			}
+		}
+		walk(f.Stmts)
+	}
 	return false
+}
+
+func isConstZero(v ir.Value, f *ir.Func) bool {
+	if v == ir.NoVal {
+		return true
+	}
+	if f == nil {
+		return false
+	}
+	var trace func(ir.Value) bool
+	trace = func(val ir.Value) bool {
+		checkIns := func(ins ir.Instr) bool {
+			if ins.Dst == val {
+				if ins.Op == ir.OpConst && ins.Imm == 0 {
+					return true
+				}
+				if ins.Op == ir.OpMov && len(ins.Args) == 1 && ins.Sym == "offslot" {
+					return trace(ins.Args[0])
+				}
+			}
+			return false
+		}
+		for _, ins := range f.Body {
+			if checkIns(ins) { return true }
+		}
+		var walk func([]ir.Stmt) bool
+		walk = func(ss []ir.Stmt) bool {
+			for _, s := range ss {
+				if s.Kind == ir.SKInstr && checkIns(s.Ins) { return true }
+				for _, ins := range s.ForInit { if checkIns(ins) { return true } }
+				for _, ins := range s.ForCondPrep { if checkIns(ins) { return true } }
+				for _, ins := range s.ForPost { if checkIns(ins) { return true } }
+				for _, ins := range s.SwitchPrep { if checkIns(ins) { return true } }
+				if walk(s.ThenBody) || walk(s.ElseBody) || walk(s.ForBody) { return true }
+			}
+			return false
+		}
+		return walk(f.Stmts)
+	}
+	return trace(v)
 }
 
 type rotResult struct {
@@ -2611,8 +4627,11 @@ func dropIdentityCasts(block, retType string, params map[string]string) string {
 }
 
 var (
-	selfCastPat     = regexp.MustCompile(`\b(u?int(?:8|16|32|64)?|byte)\(([A-Za-z_][A-Za-z0-9_]*)\)`)
-	selfCastExprPat = regexp.MustCompile(`\bint\(([A-Za-z_][A-Za-z0-9_]*) ([+\-*]) (\d+)\)`)
+	selfCastPat          = regexp.MustCompile(`\b(u?int(?:8|16|32|64)?|byte)\(([A-Za-z_][A-Za-z0-9_]*)\)`)
+	selfCastExprPat      = regexp.MustCompile(`\bint\(([A-Za-z_][A-Za-z0-9_]*) ([+\-*]) (\d+)\)`)
+	selfCastRotate32Pat  = regexp.MustCompile(`\buint32\((bits\.RotateLeft32\([^)]+\))\)`)
+	selfCastRotate64Pat  = regexp.MustCompile(`\buint64\((bits\.RotateLeft64\([^)]+\))\)`)
+	selfCastParenExprPat = regexp.MustCompile(`\bint\(\(([A-Za-z_][A-Za-z0-9_]*) ([+\-*]) (\d+)\)\)`)
 )
 
 // dropSelfCasts removes a conversion to the type the value already carries.
@@ -2620,6 +4639,15 @@ var (
 // counter is itself an int. Arithmetic keeps its parentheses: `int(v9 - 1) * 2`
 // must not become `v9 - 1 * 2`.
 func dropSelfCasts(ln string, types map[string]string) string {
+	ln = selfCastRotate32Pat.ReplaceAllString(ln, "$1")
+	ln = selfCastRotate64Pat.ReplaceAllString(ln, "$1")
+	ln = selfCastParenExprPat.ReplaceAllStringFunc(ln, func(m string) string {
+		sub := selfCastParenExprPat.FindStringSubmatch(m)
+		if types[sub[1]] == "int" {
+			return "(" + sub[1] + " " + sub[2] + " " + sub[3] + ")"
+		}
+		return m
+	})
 	ln = selfCastPat.ReplaceAllStringFunc(ln, func(m string) string {
 		sub := selfCastPat.FindStringSubmatch(m)
 		if types[sub[2]] != sub[1] {
@@ -2797,12 +4825,25 @@ func bceIndexLoops(block string) string {
 			out = append(out, lines[i])
 			continue
 		}
+		startsAtZero := false
+		for k := len(out) - 1; k >= 0; k-- {
+			t := strings.TrimSpace(out[k])
+			if t == "" || strings.HasPrefix(t, "var ") {
+				continue
+			}
+			startsAtZero = t == idx+" = 0"
+			break
+		}
+		if !startsAtZero {
+			out = append(out, lines[i])
+			continue
+		}
 		// reject nested braces / multi-line complexity
 		if strings.Count(bodyText, "{") != 0 {
 			out = append(out, lines[i])
 			continue
 		}
-		reIdx := regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\[(?:int\()?` + regexp.QuoteMeta(idx) + `\)?\]`)
+		reIdx := regexp.MustCompile(`(?:[^\w\.]|^)([A-Za-z_][A-Za-z0-9_]*)\[(?:int\()?` + regexp.QuoteMeta(idx) + `\)?\]`)
 		found := map[string]bool{}
 		for _, sm := range reIdx.FindAllStringSubmatch(bodyText, -1) {
 			if sm[1] != idx {
@@ -2833,7 +4874,8 @@ func bceIndexLoops(block string) string {
 			}
 			nl := ln
 			for _, n := range names {
-				nl = regexp.MustCompile(`\b`+regexp.QuoteMeta(n)+`\[`).ReplaceAllString(nl, "_"+n+"[")
+				reN := regexp.MustCompile(`(^|[^\w\.])` + regexp.QuoteMeta(n) + `\[`)
+				nl = reN.ReplaceAllString(nl, "${1}_"+n+"[")
 			}
 			if strings.HasPrefix(nl, pad) {
 				nl = pad + "\t" + strings.TrimPrefix(nl, pad)
@@ -3123,12 +5165,29 @@ func dropParenPairs(s string) string {
 		}
 		inner := s[i+1 : j]
 		doubled := len(inner) > 1 && inner[0] == '(' && match[i+1] == j-1
-		if i > 0 && isCallByte(s[i-1]) {
-			// f(x): these parens belong to the callee, but a lone pair inside
+		if i > 0 && (isCallByte(s[i-1]) || s[i-1] == '.') {
+			// f(x) or x.(T): these parens belong to the callee / type assertion, but a lone pair inside
 			// them — uint64((a - b)) — is still redundant.
 			if doubled {
 				drop[i+1], drop[j-1] = true, true
 			}
+			continue
+		}
+		cleanInner := strings.TrimPrefix(inner, "(")
+		if strings.HasPrefix(cleanInner, "*") {
+			k := j + 1
+			for k < len(s) && s[k] == ')' {
+				k++
+			}
+			if k < len(s) && (s[k] == '[' || s[k] == '.') {
+				if doubled {
+					drop[i+1], drop[j-1] = true, true
+				}
+				continue
+			}
+		}
+		if j+1 < len(s) && s[j+1] == '(' {
+			// (*T)(expr) is a type conversion to pointer type in Go: parens are mandatory
 			continue
 		}
 		if doubled || isPrimaryExpr(inner) {
@@ -3287,6 +5346,16 @@ func typeWidth(t ir.TypeName) int {
 	return 0
 }
 
+func isScalarIR(t ir.TypeName) bool {
+	switch t {
+	case ir.TypInt, ir.TypInt8, ir.TypInt16, ir.TypInt32, ir.TypInt64,
+		ir.TypUint8, ir.TypUint16, ir.TypUint32, ir.TypUint64,
+		ir.TypFloat32, ir.TypFloat64, ir.TypBool:
+		return true
+	}
+	return false
+}
+
 // globalsPassedToCalls names the tables that reach a function as an argument.
 // Those keep a slice type: a parameter declared []byte will not take a string
 // constant or a fixed-size array.
@@ -3415,6 +5484,9 @@ func foldSingleUseOnce(block string) (string, int) {
 		if !isSimpleIdent(lhs) || !strings.HasPrefix(lhs, "v") {
 			return asg{}, false
 		}
+		if strings.HasPrefix(rhs, "&") || strings.Contains(rhs, "&") {
+			return asg{}, false
+		}
 		if !pureExprRHS(rhs) {
 			return asg{}, false
 		}
@@ -3439,6 +5511,9 @@ func foldSingleUseOnce(block string) (string, int) {
 		return defsOf[names[i]][0].idx < defsOf[names[j]][0].idx
 	})
 	for _, name := range names {
+		if strings.Contains(block, "&"+name) {
+			continue
+		}
 		defs := defsOf[name]
 		if len(defs) != 1 {
 			continue
@@ -3531,7 +5606,7 @@ func rhsReassignedBetween(lines []string, defIdx, useIdx int, rhs string) bool {
 			lhs = lhs[:br]
 		}
 		for _, op := range ops {
-			if op == lhs {
+			if identContains(lhs, op) {
 				return true
 			}
 		}
@@ -3570,7 +5645,7 @@ func rhsAssignedAfter(lines []string, defIdx int, rhs string) bool {
 			lhs = lhs[:br]
 		}
 		for _, op := range ops {
-			if op == lhs {
+			if identContains(lhs, op) {
 				return true
 			}
 		}
@@ -3582,9 +5657,9 @@ func pureExprRHS(rhs string) bool {
 	if rhs == "" || strings.Contains(rhs, "\n") {
 		return false
 	}
-	// ban statements / calls with side effects (allow bits.* and binary.* and casts)
+	// ban statements / calls with side effects or closures (allow bits.* and binary.* and casts)
 	low := strings.ToLower(rhs)
-	if strings.Contains(low, "make(") || strings.Contains(low, "append(") {
+	if strings.Contains(low, "make(") || strings.Contains(low, "append(") || strings.Contains(low, "func(") {
 		return false
 	}
 	// bare call that is not bits./binary./known cast — allow math/bits and encoding/binary
@@ -3664,6 +5739,10 @@ func stripDeadAssignsOnce(block string) (string, int) {
 		}
 		lhs := strings.TrimSpace(trim[:eq])
 		rhs := strings.TrimSpace(trim[eq+sep:])
+		if lhs == rhs {
+			drop[i] = true
+			continue
+		}
 		if !isSimpleIdent(lhs) || !strings.HasPrefix(lhs, "v") {
 			continue
 		}
@@ -3779,6 +5858,9 @@ func foldTempCopiesOnce(block string) (string, int) {
 	}
 	for _, a := range copies {
 		t := a.rhs
+		if strings.Contains(block, "&"+a.lhs) || strings.Contains(block, "&"+t) {
+			continue
+		}
 		// Multi-def t = mutable slot (loop index, j++ base). Folding away a
 		// def of t loses updates (base64 dst[j++] → same index thrice).
 		if len(defsOf[t]) != 1 {
@@ -3795,6 +5877,26 @@ func foldTempCopiesOnce(block string) (string, int) {
 			}
 		}
 		if prior == nil {
+			continue
+		}
+		// Interdiction de replier si un identifiant présent dans prior.rhs est muté entre prior.idx et a.idx
+		mutated := false
+		for _, tok := range identTokens(prior.rhs) {
+			for k := prior.idx + 1; k < a.idx; k++ {
+				ln := strings.TrimSpace(lines[k])
+				if eq := strings.Index(ln, "="); eq > 0 {
+					lhs := strings.TrimSpace(ln[:eq])
+					if identContains(lhs, tok) {
+						mutated = true
+						break
+					}
+				}
+			}
+			if mutated {
+				break
+			}
+		}
+		if mutated {
 			continue
 		}
 		// do not eliminate a def of t if t is still read after this copy
@@ -3893,6 +5995,18 @@ func identTokens(line string) []string {
 	return out
 }
 
+func isVReg(s string) bool {
+	if len(s) < 2 || s[0] != 'v' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // stripDeadVars removes `var vN T` lines whose name never appears in the rest of the body.
 func stripDeadVars(block string) string {
 	lines := strings.Split(block, "\n")
@@ -3913,7 +6027,7 @@ func stripDeadVars(block string) string {
 			continue
 		}
 		name := rest[:sp]
-		if !isSimpleIdent(name) {
+		if !isVReg(name) {
 			continue
 		}
 		vars = append(vars, varLine{i, name})
@@ -3922,14 +6036,23 @@ func stripDeadVars(block string) string {
 		return block
 	}
 	drop := map[int]bool{}
+	seenName := map[string]int{}
+	varDeclLines := map[int]bool{}
 	for _, v := range vars {
+		varDeclLines[v.idx] = true
+	}
+	for _, v := range vars {
+		if _, ok := seenName[v.name]; ok {
+			drop[v.idx] = true
+			continue
+		}
+		seenName[v.name] = v.idx
 		used := false
 		for j, ln := range lines {
-			if j == v.idx {
+			if varDeclLines[j] {
 				continue
 			}
 			if strings.Contains(ln, v.name) {
-				// word-boundary-ish: avoid v1 matching v12
 				if identContains(ln, v.name) {
 					used = true
 					break
@@ -3978,14 +6101,14 @@ func identContains(line, name string) bool {
 // canPureAlias: dst is a single-write temp copying a single-write (or named) src.
 // Multi-write src needs a physical snapshot (loop-carried values).
 func canPureAlias(e *env, dst ir.Value, rhs string) bool {
-	if e.isParam[dst] || e.writeCount[dst] != 1 {
+	if e.isParam[dst] || e.writeCount[dst] != 1 || e.isAddrOf[dst] {
 		return false
 	}
 	if !isSimpleIdent(rhs) || strings.ContainsAny(rhs, ".[]") {
 		return false
 	}
 	if src, ok := parseVReg(rhs); ok {
-		if e.writeCount[src] != 1 {
+		if e.writeCount[src] != 1 || e.isAddrOf[src] {
 			return false
 		}
 	}
@@ -4005,6 +6128,15 @@ func parseVReg(s string) (ir.Value, bool) {
 		n = n*10 + int(c-'0')
 	}
 	return ir.Value(n), true
+}
+
+func (e *env) findStruct(name string) *ir.StructType {
+	for i := range e.structs {
+		if strings.EqualFold(e.structs[i].Name, name) || strings.EqualFold(exportName(e.structs[i].Name), name) {
+			return &e.structs[i]
+		}
+	}
+	return nil
 }
 
 func isSimpleIdent(s string) bool {
@@ -4114,10 +6246,30 @@ func formatImm(imm int64, ctx ir.TypeName) string {
 			return fmt.Sprintf("0x%x", u)
 		}
 		return fmt.Sprintf("%d", imm)
+	case ir.TypBool:
+		if imm == 0 {
+			return "false"
+		}
+		return "true"
+	case ir.TypString:
+		if imm == 0 {
+			return `""`
+		}
+		return fmt.Sprintf("%q", string(byte(imm)))
+	case ir.TypeName("any"), ir.TypeName("any_"), StubParamType:
+		return fmt.Sprintf("%d", imm)
 	default:
 		gt := goType(ctx)
 		if gt == "" {
 			gt = "int"
+		}
+		if isSliceType(ctx) || strings.HasPrefix(gt, "[]") || strings.HasPrefix(gt, "*") {
+			if imm == 0 {
+				return "nil"
+			}
+			if strings.HasPrefix(gt, "[]") {
+				return fmt.Sprintf("uint64(%d)", imm)
+			}
 		}
 		u := uint64(imm)
 		if preferHexU(u) {
@@ -4138,8 +6290,45 @@ func preferHexU(u uint64) bool {
 	return true
 }
 
+func isQuote(s string, i int, q byte) bool {
+	if s[i] != q {
+		return false
+	}
+	nSlash := 0
+	for j := i - 1; j >= 0 && s[j] == '\\'; j-- {
+		nSlash++
+	}
+	return nSlash%2 == 0
+}
+
+func splitCSVRespectingQuotes(s string) []string {
+	var out []string
+	var cur strings.Builder
+	inChar := false
+	inString := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if isQuote(s, i, '\'') {
+			inChar = !inChar
+		}
+		if isQuote(s, i, '"') {
+			inString = !inString
+		}
+		if c == ',' && !inChar && !inString {
+			out = append(out, cur.String())
+			cur.Reset()
+			continue
+		}
+		cur.WriteByte(c)
+	}
+	if cur.Len() > 0 {
+		out = append(out, cur.String())
+	}
+	return out
+}
+
 func formatInitCSV(csv string, elem ir.TypeName) string {
-	parts := strings.Split(csv, ",")
+	parts := splitCSVRespectingQuotes(csv)
 	var out []string
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
@@ -4243,16 +6432,39 @@ func countUses(ss []ir.Stmt, uc map[ir.Value]int) {
 	walk(ss)
 }
 
-func countWrites(ss []ir.Stmt, wc map[ir.Value]int) {
-	var walk func([]ir.Stmt)
-	walk = func(sts []ir.Stmt) {
+func countWrites(ss []ir.Stmt, wc map[ir.Value]int, nested map[ir.Value]bool) {
+	var hasCont func([]ir.Stmt) bool
+	hasCont = func(sts []ir.Stmt) bool {
+		for _, s := range sts {
+			if s.Kind == ir.SKInstr && s.Ins.Op == ir.OpContinue {
+				return true
+			}
+			if hasCont(s.ThenBody) || hasCont(s.ElseBody) || hasCont(s.DoBody) {
+				return true
+			}
+			for _, c := range s.SwitchCases {
+				if hasCont(c.Body) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	var walk func([]ir.Stmt, bool)
+	walk = func(sts []ir.Stmt, isNested bool) {
 		for _, s := range sts {
 			bumpD := func(ins ir.Instr) {
 				switch ins.Op {
 				case ir.OpNop, ir.OpReturn, ir.OpStore:
 					return
 				}
+				if ins.Sym == "decl_uninit" {
+					return
+				}
 				wc[ins.Dst]++
+				if isNested && nested != nil {
+					nested[ins.Dst] = true
+				}
 			}
 			for _, ins := range s.ForInit {
 				bumpD(ins)
@@ -4263,22 +6475,27 @@ func countWrites(ss []ir.Stmt, wc map[ir.Value]int) {
 			for _, ins := range s.ForPost {
 				bumpD(ins)
 			}
+			if hasCont(s.ForBody) {
+				for _, ins := range s.ForPost {
+					bumpD(ins)
+				}
+			}
 			for _, ins := range s.SwitchPrep {
 				bumpD(ins)
 			}
 			if s.Kind == ir.SKInstr {
 				bumpD(s.Ins)
 			}
-			walk(s.ForBody)
-			walk(s.ThenBody)
-			walk(s.ElseBody)
-			walk(s.DoBody)
+			walk(s.ForBody, true)
+			walk(s.ThenBody, true)
+			walk(s.ElseBody, true)
+			walk(s.DoBody, true)
 			for _, c := range s.SwitchCases {
-				walk(c.Body)
+				walk(c.Body, true)
 			}
 		}
 	}
-	walk(ss)
+	walk(ss, false)
 }
 
 func markDivMulFolds(ss []ir.Stmt, e *env) {
@@ -4426,6 +6643,18 @@ func isRead(v ir.Value, ss []ir.Stmt) bool {
 	return false
 }
 
+func isVregName(s string) bool {
+	if !strings.HasPrefix(s, "v") || len(s) < 2 {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func binOp(op ir.Op) string {
 	switch op {
 	case ir.OpAdd:
@@ -4455,35 +6684,96 @@ func binOp(op ir.Op) string {
 
 func goType(t ir.TypeName) string {
 	switch t {
-	case ir.TypUint8:
-		return "uint8"
-	case ir.TypInt8:
+	case ir.TypUint8, ir.TypeName("byte"), ir.TypeName("u8"), ir.TypeName("uint8_t"), ir.TypeName("unsigned char"):
+		return "byte"
+	case ir.TypInt8, ir.TypeName("i8"), ir.TypeName("int8_t"), ir.TypeName("signed char"):
 		return "int8"
-	case ir.TypInt16:
+	case ir.TypInt16, ir.TypeName("i16"), ir.TypeName("int16_t"), ir.TypeName("short"), ir.TypeName("signed short"):
 		return "int16"
-	case ir.TypInt32:
+	case ir.TypUint16, ir.TypeName("u16"), ir.TypeName("uint16_t"), ir.TypeName("unsigned short"):
+		return "uint16"
+	case ir.TypInt32, ir.TypeName("i32"), ir.TypeName("int32_t"), ir.TypeName("signed int"):
 		return "int32"
-	case ir.TypUint32:
+	case ir.TypUint32, ir.TypeName("u32"), ir.TypeName("uint32_t"), ir.TypeName("unsigned int"), ir.TypeName("unsigned"):
 		return "uint32"
-	case ir.TypUint64:
+	case ir.TypUint64, ir.TypeName("u64"), ir.TypeName("uint64_t"), ir.TypeName("size_t"), ir.TypeName("usize"), ir.TypeName("uintptr_t"), ir.TypeName("unsigned long"), ir.TypeName("unsigned long long"):
 		return "uint64"
-	case ir.TypInt64:
+	case ir.TypInt64, ir.TypeName("i64"), ir.TypeName("int64_t"), ir.TypeName("long long"), ir.TypeName("long"), ir.TypeName("signed long"), ir.TypeName("signed long long"):
 		return "int64"
-	case ir.TypFloat32:
+	case ir.TypFloat32, ir.TypeName("float"):
 		return "float32"
-	case ir.TypFloat64:
+	case ir.TypFloat64, ir.TypeName("double"):
 		return "float64"
 	case ir.TypBool:
 		return "bool"
+	case ir.TypString:
+		return "string"
+	case ir.TypUint128:
+		return "[2]uint64"
+	case ir.TypInt, ir.TypeName("cJSON_bool"), ir.TypeName("CJSON_bool"):
+		return "int"
 	case ir.TypVoid:
 		return ""
+	case ir.TypeName("any"), ir.TypeName("any_"):
+		return "any"
+	case ir.TypeName("void*"), ir.TypeName("void *"), ir.TypeName("const void*"), ir.TypeName("const void *"):
+		return "any"
+	case ir.TypeName("ptr_lookup_fn"), ir.TypeName("Ptr_lookup_fn"):
+		return "func(*Libinjection_sqli_state, int, []byte, uint64) byte"
+	case ir.TypeName("pt2Function"), ir.TypeName("Pt2Function"), ir.TypeName("pt2function"):
+		return "func(*Libinjection_sqli_state) uint64"
 	default:
+		if strings.HasPrefix(string(t), "func") {
+			return string(t)
+		}
+		if strings.HasPrefix(string(t), "[]") {
+			return "[]" + goType(ir.TypeName(strings.TrimPrefix(string(t), "[]")))
+		}
+		if strings.HasPrefix(string(t), "[") && strings.Contains(string(t), "]") {
+			idx := strings.Index(string(t), "]")
+			return string(t)[:idx+1] + goType(ir.TypeName(string(t)[idx+1:]))
+		}
+		if strings.HasPrefix(string(t), "*") {
+			return "*" + goType(ir.TypeName(strings.TrimPrefix(string(t), "*")))
+		}
+		if t != "" {
+			return exportName(string(t))
+		}
 		return "int"
 	}
 }
 
+func isStructType(name string, structs []ir.StructType) bool {
+	for _, st := range structs {
+		if strings.EqualFold(st.Name, name) || exportName(st.Name) == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *env) isStructTypeName(s string) bool {
+	s = strings.TrimPrefix(s, "*")
+	s = strings.TrimPrefix(s, "[]")
+	if isStructType(s, e.structs) {
+		return true
+	}
+	return strings.Contains(s, "_ctx") || strings.Contains(s, "Ctx")
+}
+
 func isStructTypeName(s string) bool {
 	return strings.Contains(s, "_ctx") || strings.Contains(s, "Ctx")
+}
+
+func isPrimitiveGoType(gt string) bool {
+	switch gt {
+	case "int", "int8", "int16", "int32", "int64",
+		"uint", "uint8", "uint16", "uint32", "uint64", "byte", "rune",
+		"float32", "float64", "bool", "string":
+		return true
+	default:
+		return false
+	}
 }
 
 var goKeywords = map[string]bool{
@@ -4501,6 +6791,34 @@ var goKeywords = map[string]bool{
 	"bool": true, "string": true, "int": true, "int8": true, "int16": true,
 	"int32": true, "int64": true, "uint": true, "uint8": true, "uint16": true,
 	"uint32": true, "uint64": true, "uintptr": true, "float32": true, "float64": true,
+}
+
+func isNumericOrCharLit(s string) bool {
+	if s == "" {
+		return false
+	}
+	if strings.HasPrefix(s, "'") && strings.HasSuffix(s, "'") {
+		return true
+	}
+	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
+		return true
+	}
+	if s[0] == '-' || (s[0] >= '0' && s[0] <= '9') {
+		return true
+	}
+	return false
+}
+
+func isGlobalName(m *ir.Module, name string) bool {
+	if m == nil {
+		return false
+	}
+	for _, g := range m.Globals {
+		if g.Name == name || exportName(g.Name) == name {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitizeIdent(s string) string {
@@ -4573,6 +6891,15 @@ func baseCallSym(sym string) string {
 
 func resolveGoName(e *env, sym string) string {
 	sym = baseCallSym(sym)
+	if strings.Contains(sym, "->") || strings.Contains(sym, ".") {
+		clean := strings.ReplaceAll(sym, "->", ".")
+		parts := strings.Split(clean, ".")
+		res := sanitizeIdent(parts[0])
+		for _, p := range parts[1:] {
+			res += "." + exportName(p)
+		}
+		return res
+	}
 	if e != nil && e.goName != nil {
 		if n, ok := e.goName[sym]; ok {
 			return n
@@ -4596,14 +6923,18 @@ func resolveGoName(e *env, sym string) string {
 
 // emitBuiltinCall maps common C string/mem helpers to Go expressions.
 // args are already rendered Go expressions.
-func emitBuiltinCall(sym string, args []string) string {
+func emitBuiltinCall(e *env, ins ir.Instr, sym string, args []string) string {
 	low := strings.ToLower(sym)
 	switch low {
 	case "strchr":
 		// C strchr: pointer to first c in s, else NULL. Go: s[i:] or nil.
 		// Stops at embedded NUL (C string end) when present in the slice.
 		if len(args) >= 2 {
-			return fmt.Sprintf(`func() []byte { s := %s; c := byte(%s); for i := 0; i < len(s); i++ { if s[i] == c { return s[i:] }; if s[i] == 0 { break } }; return nil }()`, args[0], args[1])
+			return fmt.Sprintf(`func() []byte { s := []byte(%s); c := byte(%s); for i := 0; i < len(s); i++ { if s[i] == c { return s[i:] }; if s[i] == 0 { break } }; return nil }()`, args[0], args[1])
+		}
+	case "memchr":
+		if len(args) >= 3 {
+			return fmt.Sprintf(`func() []byte { s := []byte(%s); c := byte(%s); n := int(%s); for i := 0; i < n && i < len(s); i++ { if s[i] == c { return s[i:] } }; return nil }()`, args[0], args[1], args[2])
 		}
 	case "strlen":
 		if len(args) >= 1 {
@@ -4614,21 +6945,72 @@ func emitBuiltinCall(sym string, args []string) string {
 			return fmt.Sprintf("func() int { a,b:=%s,%s; n:=int(%s); for i:=0;i<n&&i<len(a)&&i<len(b);i++ { if a[i]!=b[i] { if a[i]<b[i] { return -1 }; return 1 } }; return 0 }()", args[0], args[1], args[2])
 		}
 	case "memset":
-		// memset(p, v, n) — n treated as element count capped by len(p)
+		// memset(p, v, n)
 		if len(args) >= 3 {
-			if isZeroLit(args[1]) {
-				return fmt.Sprintf("func() { p:=%s; n:=int(%s); for i:=0;i<n&&i<len(p);i++ { p[i]=0 } }()", args[0], args[2])
+			if e != nil && len(ins.Args) > 0 {
+				v0 := ins.Args[0]
+				t0 := e.regType[v0]
+				sname := string(t0)
+				if e.isStructTypeName(sname) || e.findStruct(sname) != nil {
+					st := e.findStruct(sname)
+					targetName := strings.TrimPrefix(strings.TrimPrefix(sname, "*"), "[]")
+					if st != nil {
+						targetName = st.Name
+					}
+					arg0 := strings.TrimSuffix(strings.TrimPrefix(args[0], "&"), "[:]")
+					if isZeroLit(args[1]) {
+						if strings.HasPrefix(args[0], "&") || (!strings.HasPrefix(string(t0), "*") && !e.scalarPtr[v0]) {
+							return fmt.Sprintf("%s = %s{}", arg0, exportName(targetName))
+						}
+						return fmt.Sprintf("*%s = %s{}", arg0, exportName(targetName))
+					}
+				}
+				if strings.HasPrefix(args[0], "&") {
+					base := strings.TrimPrefix(args[0], "&")
+					if isZeroLit(args[1]) {
+						if e.isStructTypeName(sname) {
+							return fmt.Sprintf("%s = %s{}", base, exportName(sname))
+						}
+					}
+				}
 			}
-			return fmt.Sprintf("func() { p:=%s; v:=byte(%s); n:=int(%s); for i:=0;i<n&&i<len(p);i++ { p[i]=v } }()", args[0], args[1], args[2])
+			if isZeroLit(args[1]) {
+				return fmt.Sprintf("clear(%s[:%s])", args[0], args[2])
+			}
+			return fmt.Sprintf("func() { p := %s; v := byte(%s); n := int(%s); for i := 0; i < n && i < len(p); i++ { p[i] = v } }()", args[0], args[1], args[2])
 		}
 	case "memcpy", "memmove":
-		// element-wise copy, n capped by lens (C byte count ≈ OK when n≥elems)
+		// element-wise copy
 		if len(args) >= 3 {
-			return fmt.Sprintf("func() { d,s:=%s,%s; n:=int(%s); for i:=0;i<n&&i<len(d)&&i<len(s);i++ { d[i]=s[i] } }()", args[0], args[1], args[2])
+			if e != nil && len(ins.Args) >= 2 {
+				v0 := ins.Args[0]
+				t0 := e.regType[v0]
+				sname := string(t0)
+				if e.isStructTypeName(sname) || e.findStruct(sname) != nil {
+					lhs := "*" + args[0]
+					rhs := "*" + args[1]
+					if strings.HasPrefix(args[0], "&") {
+						lhs = strings.TrimPrefix(args[0], "&")
+					}
+					if strings.HasPrefix(args[1], "&") {
+						rhs = strings.TrimPrefix(args[1], "&")
+					}
+					return fmt.Sprintf("%s = %s", lhs, rhs)
+				}
+			}
+			return fmt.Sprintf("copy(%s[:%s], %s[:%s])", args[0], args[2], args[1], args[2])
 		}
 	case "strcmp":
 		if len(args) >= 2 {
-			return fmt.Sprintf("func() int { a,b:=%s,%s; n:=len(a); if len(b)<n { n=len(b) }; for i:=0;i<n;i++ { if a[i]!=b[i] { if a[i]<b[i] { return -1 }; return 1 } }; if len(a)<len(b) { return -1 }; if len(a)>len(b) { return 1 }; return 0 }()", args[0], args[1])
+			return fmt.Sprintf("func() int { a,b:=%s,%s; for i:=0; i<len(a) && i<len(b); i++ { if a[i]!=b[i] { if a[i]<b[i] { return -1 }; return 1 }; if a[i]==0 { return 0 } }; if len(a)<len(b) && (len(a)==0 || a[len(a)-1]!=0) { return -1 }; if len(a)>len(b) && (len(b)==0 || b[len(b)-1]!=0) { return 1 }; return 0 }()", args[0], args[1])
+		}
+	case "fabs":
+		if len(args) >= 1 {
+			return fmt.Sprintf("func() float64 { x := float64(%s); if x < 0 { return -x }; return x }()", args[0])
+		}
+	case "tolower":
+		if len(args) >= 1 {
+			return fmt.Sprintf("func() int { c := byte(%s); if c >= 'A' && c <= 'Z' { return int(c + 32) }; return int(c) }()", args[0])
 		}
 	}
 	return ""
@@ -4636,8 +7018,10 @@ func emitBuiltinCall(sym string, args []string) string {
 
 func isZeroLit(s string) bool {
 	s = strings.TrimSpace(s)
-	switch s {
-	case "0", "uint8(0)", "uint32(0)", "uint64(0)", "int(0)", "byte(0)":
+	if s == "0" || s == "0x0" || s == "0x00" || s == "'\\x00'" || s == "'\\0'" || s == `"\x00"` {
+		return true
+	}
+	if strings.HasSuffix(s, "(0)") || strings.HasSuffix(s, "(0x0)") {
 		return true
 	}
 	return false
@@ -4806,18 +7190,20 @@ func isUsedAsCond(f *ir.Func, reg ir.Value) bool {
 	var markCond func(ss []ir.Stmt)
 	markCond = func(ss []ir.Stmt) {
 		for _, s := range ss {
-			if s.CondLeft != 0 {
-				condRegs[s.CondLeft] = true
+			if s.Kind == ir.SKInstr && s.Ins.Sym == "__select" && len(s.Ins.Args) >= 1 {
+				condRegs[s.Ins.Args[0]] = true
 			}
-			if s.CondRight != 0 {
-				condRegs[s.CondRight] = true
-			}
-			if s.SwitchOn != 0 {
-				condRegs[s.SwitchOn] = true
+			if s.Kind == ir.SKIf || s.Kind == ir.SKFor || s.Kind == ir.SKDoWhile {
+				if s.CondOp == "" && s.CondLeft != 0 {
+					condRegs[s.CondLeft] = true
+				} else if s.CondOp == "!=" && s.CondRight == 0 && s.CondLeft != 0 {
+					condRegs[s.CondLeft] = true
+				}
 			}
 			markCond(s.ForBody)
 			markCond(s.ThenBody)
 			markCond(s.ElseBody)
+			markCond(s.DoBody)
 			for _, c := range s.SwitchCases {
 				markCond(c.Body)
 			}
@@ -4825,16 +7211,58 @@ func isUsedAsCond(f *ir.Func, reg ir.Value) bool {
 	}
 	markCond(f.Stmts)
 
+	var instrs []ir.Instr
+	var collectInstrs func(ss []ir.Stmt)
+	collectInstrs = func(ss []ir.Stmt) {
+		for _, s := range ss {
+			if s.Kind == ir.SKInstr {
+				instrs = append(instrs, s.Ins)
+			}
+			instrs = append(instrs, s.ForInit...)
+			instrs = append(instrs, s.ForPost...)
+			instrs = append(instrs, s.SwitchPrep...)
+			collectInstrs(s.ForBody)
+			collectInstrs(s.ThenBody)
+			collectInstrs(s.ElseBody)
+			collectInstrs(s.DoBody)
+			for _, c := range s.SwitchCases {
+				collectInstrs(c.Body)
+			}
+		}
+	}
+	collectInstrs(f.Stmts)
+	instrs = append(instrs, f.Body...)
+
+	if f.Result == ir.TypBool {
+		for _, ins := range instrs {
+			if ins.Op == ir.OpReturn && len(ins.Args) > 0 {
+				condRegs[ins.Args[0]] = true
+			}
+		}
+	}
+
 	// Propagate backwards through comparison instructions
 	changed := true
 	for changed {
 		changed = false
-		for _, ins := range f.Body {
-			if strings.HasPrefix(ins.Sym, "__cmp_") && condRegs[ins.Dst] {
-				for _, arg := range ins.Args {
-					if arg != 0 && !condRegs[arg] {
-						condRegs[arg] = true
-						changed = true
+		for _, ins := range instrs {
+			if condRegs[ins.Dst] {
+				if ins.Sym == "__cmp_&&" || ins.Sym == "__cmp_||" {
+					for _, arg := range ins.Args {
+						if arg != 0 && !condRegs[arg] {
+							condRegs[arg] = true
+							changed = true
+						}
+					}
+				} else if (ins.Sym == "__cmp_==" || ins.Sym == "__cmp_!=") && len(ins.Args) == 2 {
+					if arg0 := ins.Args[0]; arg0 != 0 && !condRegs[arg0] {
+						for _, prev := range instrs {
+							if prev.Dst == arg0 && strings.HasPrefix(prev.Sym, "__cmp_") {
+								condRegs[arg0] = true
+								changed = true
+								break
+							}
+						}
 					}
 				}
 			}

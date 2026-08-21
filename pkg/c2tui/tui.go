@@ -1,8 +1,8 @@
 package c2tui
 
 import (
-	tuidiff "code.hazyhaar.fr/devhoros/c2simd/internal/tuidiff"
-	vtparser "code.hazyhaar.fr/devhoros/c2simd/internal/vtparser"
+	tuidiff "code.hazyhaar.fr/devhoros/c2simd/pkg/c2tuidiff"
+	vtparser "code.hazyhaar.fr/devhoros/c2simd/pkg/c2vtparser"
 )
 
 type (

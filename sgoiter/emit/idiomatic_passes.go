@@ -282,10 +282,10 @@ func archCleanupWipeAveux(src string) string {
 }
 
 var (
-	reDoubleInt64  = regexp.MustCompile(`int64\(int64\(([^)]+)\)\)`)
-	reDoubleInt    = regexp.MustCompile(`int\(int\(([^)]+)\)\)`)
-	reDoubleUint64 = regexp.MustCompile(`uint64\(uint64\(([^)]+)\)\)`)
-	reDoubleUint32 = regexp.MustCompile(`uint32\(uint32\(([^)]+)\)\)`)
+	reDoubleInt64  = regexp.MustCompile(`\bint64\(int64\(([a-zA-Z0-9_\.]+)\)\)`)
+	reDoubleInt    = regexp.MustCompile(`\bint\(int\(([a-zA-Z0-9_\.]+)\)\)`)
+	reDoubleUint64 = regexp.MustCompile(`\buint64\(uint64\(([a-zA-Z0-9_\.]+)\)\)`)
+	reDoubleUint32 = regexp.MustCompile(`\buint32\(uint32\(([a-zA-Z0-9_\.]+)\)\)`)
 )
 
 // archFoldPingPongCasts replie les doubles conversions de types identiques redondantes.

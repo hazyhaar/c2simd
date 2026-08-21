@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 export GOWORK=off
+export PATH="/home/cl-ment/sdk/go1.27rc3/bin:/home/cl-ment/go/bin:$PATH"
 ./sgoiter/scripts/rebuild_bench.sh
 go test ./sgoiter/... -count=1
 ./bin/tribench -root "$ROOT" -sgoiter ./bin/sgoiter -skip-ccgo -skip-bench

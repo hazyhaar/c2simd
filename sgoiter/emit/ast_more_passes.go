@@ -7,6 +7,7 @@ package emit
 // fail-safe sur corps non parsable.
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -575,6 +576,39 @@ func astStripAssignLiteralCasts(body string) string {
 	})
 }
 
+// astFixStringSliceCallArgs convertit les arguments de type string passés à des appels de fonction
+// en []byte(nom) pour correspondre aux signatures de transpileur C en Go.
+func astFixStringSliceCallArgs(body string) string {
+	return astRewriteBody(body, func(src string, f *ast.File, fset *token.FileSet, add func(ast.Node, string)) {
+		stringVars := map[string]bool{}
+		ast.Inspect(f, func(n ast.Node) bool {
+			if vs, ok := n.(*ast.ValueSpec); ok {
+				if id, ok := vs.Type.(*ast.Ident); ok && id.Name == "string" {
+					for _, name := range vs.Names {
+						stringVars[name.Name] = true
+					}
+				}
+			}
+			return true
+		})
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			for _, arg := range call.Args {
+				expr := ast.Unparen(arg)
+				if id, ok := expr.(*ast.Ident); ok {
+					if stringVars[id.Name] || strings.HasPrefix(id.Name, "__str_") {
+						add(arg, "[]byte("+id.Name+")")
+					}
+				}
+			}
+			return true
+		})
+	})
+}
+
 const astDeclPrefix = "package p\n\n"
 
 // astRewriteDecls : même mécanique d'épissage que astRewriteBody, mais pour un
@@ -717,3 +751,241 @@ func astStripDeadGlobals(src string, keepNames ...string) string {
 		}
 	}
 }
+
+// astDeduplicateLogical simplifie les expressions logiques avec des opérandes dupliqués
+// issus de code C comme `if (object == NULL || string == NULL || item == NULL || object == NULL)`
+// qui déclenchent un diagnostic "redundant or" sous go vet.
+func astDeduplicateLogical(body string) string {
+	var flatten func(e ast.Expr, op token.Token) []ast.Expr
+	flatten = func(e ast.Expr, op token.Token) []ast.Expr {
+		e = ast.Unparen(e)
+		if bin, ok := e.(*ast.BinaryExpr); ok && bin.Op == op {
+			return append(flatten(bin.X, op), flatten(bin.Y, op)...)
+		}
+		return []ast.Expr{e}
+	}
+	return astRewriteBody(body, func(src string, f *ast.File, fset *token.FileSet, add func(ast.Node, string)) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			bin, ok := n.(*ast.BinaryExpr)
+			if !ok || (bin.Op != token.LOR && bin.Op != token.LAND) {
+				return true
+			}
+			operands := flatten(bin, bin.Op)
+			if len(operands) <= 1 {
+				return true
+			}
+			seen := map[string]bool{}
+			var deduped []string
+			hasDup := false
+			for _, opExpr := range operands {
+				s := strings.TrimSpace(nodeSrc(src, fset, opExpr))
+				if seen[s] {
+					hasDup = true
+					continue
+				}
+				seen[s] = true
+				deduped = append(deduped, s)
+			}
+			if hasDup {
+				opStr := " || "
+				if bin.Op == token.LAND {
+					opStr = " && "
+				}
+				add(bin, strings.Join(deduped, opStr))
+				return false
+			}
+			return true
+		})
+	})
+}
+
+// astFixBooleanArithmetic convertit les opérandes booléens d'opérations arithmétiques/décalages
+// (ex: (v != 0) << 1) en func() int { if v != 0 { return 1 }; return 0 }() << 1 pour satisfaire le typage Go.
+func astFixBooleanArithmetic(body string) string {
+	return astRewriteBody(body, func(src string, f *ast.File, fset *token.FileSet, add func(ast.Node, string)) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			bin, ok := n.(*ast.BinaryExpr)
+			if !ok {
+				return true
+			}
+			switch bin.Op {
+			case token.SHL, token.SHR, token.ADD, token.SUB, token.MUL, token.QUO, token.REM, token.AND_NOT:
+				if isASTBoolNode(bin.X) {
+					add(bin.X, fmt.Sprintf("func() int { if %s { return 1 }; return 0 }()", nodeSrc(src, fset, bin.X)))
+				}
+				if isASTBoolNode(bin.Y) {
+					add(bin.Y, fmt.Sprintf("func() int { if %s { return 1 }; return 0 }()", nodeSrc(src, fset, bin.Y)))
+				}
+			}
+			return true
+		})
+	})
+}
+
+func isASTBoolNode(n ast.Expr) bool {
+	n = ast.Unparen(n)
+	if bin, ok := n.(*ast.BinaryExpr); ok {
+		switch bin.Op {
+		case token.EQL, token.NEQ, token.LEQ, token.GEQ, token.LSS, token.GTR, token.LAND, token.LOR:
+			return true
+		}
+	}
+	if un, ok := n.(*ast.UnaryExpr); ok && un.Op == token.NOT {
+		return true
+	}
+	return false
+}
+
+// astFoldBooleanClosures simplifie les expressions de condition du type:
+// if (func() int { if COND { return 1 }; return 0 }()) != 0
+// directement en if COND.
+func astFoldBooleanClosures(body string) string {
+	return astRewriteBody(body, func(src string, f *ast.File, fset *token.FileSet, add func(ast.Node, string)) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			ifStmt, ok := n.(*ast.IfStmt)
+			if !ok {
+				return true
+			}
+			cond := ast.Unparen(ifStmt.Cond)
+			if bin, ok := cond.(*ast.BinaryExpr); ok && bin.Op == token.NEQ {
+				if lit, ok := ast.Unparen(bin.Y).(*ast.BasicLit); ok && lit.Value == "0" {
+					if call, ok := ast.Unparen(bin.X).(*ast.CallExpr); ok {
+						if innerCond, ok := extractBooleanClosureCond(call, src, fset); ok {
+							add(ifStmt.Cond, innerCond)
+						}
+					}
+				}
+			}
+			return true
+		})
+	})
+}
+
+func extractBooleanClosureCond(call *ast.CallExpr, src string, fset *token.FileSet) (string, bool) {
+	fn, ok := call.Fun.(*ast.FuncLit)
+	if !ok || fn.Type == nil || fn.Type.Params == nil || len(fn.Type.Params.List) != 0 || fn.Body == nil || len(fn.Body.List) != 2 {
+		return "", false
+	}
+	ifInner, ok := fn.Body.List[0].(*ast.IfStmt)
+	retF, ok2 := fn.Body.List[1].(*ast.ReturnStmt)
+	if !ok || !ok2 || len(retF.Results) != 1 {
+		return "", false
+	}
+	litF, ok := retF.Results[0].(*ast.BasicLit)
+	if !ok || litF.Value != "0" {
+		return "", false
+	}
+	if len(ifInner.Body.List) != 1 {
+		return "", false
+	}
+	retT, ok := ifInner.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(retT.Results) != 1 {
+		return "", false
+	}
+	litT, ok := retT.Results[0].(*ast.BasicLit)
+	if !ok || litT.Value != "1" {
+		return "", false
+	}
+	return nodeSrc(src, fset, ifInner.Cond), true
+}
+
+// astCollapseBooleanRegisterChains résout et remplace les chaînes de registres booléens intermédiaires
+// par leurs expressions booléennes directes dans les instructions if.
+func astCollapseBooleanRegisterChains(body string) string {
+	return astRewriteBody(body, func(src string, f *ast.File, fset *token.FileSet, add func(ast.Node, string)) {
+		condMap := make(map[string]string)
+
+		ast.Inspect(f, func(n ast.Node) bool {
+			assign, ok := n.(*ast.AssignStmt)
+			if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+				return true
+			}
+			ident, ok := assign.Lhs[0].(*ast.Ident)
+			if !ok {
+				return true
+			}
+			call, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if condStr, ok := extractBooleanClosureCond(call, src, fset); ok {
+				condMap[ident.Name] = condStr
+			}
+			return true
+		})
+
+		if len(condMap) == 0 {
+			return
+		}
+
+		changed := true
+		for changed {
+			changed = false
+			for k, v := range condMap {
+				for varName, targetCond := range condMap {
+					if varName == k {
+						continue
+					}
+					patNeq := fmt.Sprintf("(%s != 0)", varName)
+					patNeqPlain := fmt.Sprintf("%s != 0", varName)
+					if strings.Contains(v, patNeq) {
+						v = strings.ReplaceAll(v, patNeq, "("+targetCond+")")
+						condMap[k] = v
+						changed = true
+					} else if strings.Contains(v, patNeqPlain) {
+						v = strings.ReplaceAll(v, patNeqPlain, "("+targetCond+")")
+						condMap[k] = v
+						changed = true
+					}
+				}
+			}
+		}
+
+		ast.Inspect(f, func(n ast.Node) bool {
+			ifStmt, ok := n.(*ast.IfStmt)
+			if !ok {
+				return true
+			}
+			cond := ast.Unparen(ifStmt.Cond)
+			if bin, ok := cond.(*ast.BinaryExpr); ok && bin.Op == token.NEQ {
+				if lit, ok := ast.Unparen(bin.Y).(*ast.BasicLit); ok && lit.Value == "0" {
+					if id, ok := ast.Unparen(bin.X).(*ast.Ident); ok {
+						if resolvedCond, ok := condMap[id.Name]; ok {
+							add(ifStmt.Cond, resolvedCond)
+						}
+					}
+				}
+			} else if id, ok := cond.(*ast.Ident); ok {
+				if resolvedCond, ok := condMap[id.Name]; ok {
+					add(ifStmt.Cond, resolvedCond)
+				}
+			}
+			return true
+		})
+	})
+}
+
+// astEliminateDeadCodeAfterReturn supprime toutes les instructions situées après
+// un return inconditionnel dans un même bloc syntaxique.
+func astEliminateDeadCodeAfterReturn(body string) string {
+	return astRewriteBody(body, func(src string, f *ast.File, fset *token.FileSet, add func(ast.Node, string)) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			blk, ok := n.(*ast.BlockStmt)
+			if !ok {
+				return true
+			}
+			foundReturn := false
+			for _, st := range blk.List {
+				if foundReturn {
+					add(st, "")
+					continue
+				}
+				if _, isRet := st.(*ast.ReturnStmt); isRet {
+					foundReturn = true
+				}
+			}
+			return true
+		})
+	})
+}
+

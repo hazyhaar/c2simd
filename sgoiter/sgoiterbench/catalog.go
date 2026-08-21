@@ -179,8 +179,8 @@ func CatalogExtra(c2root string) []ExtraSpec {
 			RelCPath:    "spec/c_sources/upstream/stb/stb_image_impl.c",
 			HPM55Name:   "sgoiter-stb-image",
 			Upstream:    "https://github.com/nothings/stb",
-			Notes:       "STB_IMAGE_IMPLEMENTATION — err_empty/include (amalgamation / header)",
-			FrontExpect: "fail_include",
+			Notes:       "STB_IMAGE_IMPLEMENTATION — front OK stub emit",
+			FrontExpect: "stub",
 		},
 		// --- dogfood kernels (subset, emit green) ---
 		{

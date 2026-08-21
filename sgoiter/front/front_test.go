@@ -249,3 +249,60 @@ func TestMonoAEAD_MultiBlock_1KB_Generated(t *testing.T) {
 		t.Fatalf("go test 1KB failed: %v\nOutput: %s", err, string(out))
 	}
 }
+
+func TestBug2PArrowMulPlus(t *testing.T) {
+	src := `
+typedef struct {
+    int prm;
+} c2_vt_parser_t;
+
+int c2_test_add_digit(c2_vt_parser_t *p, unsigned char b) {
+    int v = p->prm * 10 + ((int)b - 48);
+    return v;
+}
+`
+	res, err := front.ParsePartial(src, "test_bug2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Skipped) > 0 {
+		t.Fatalf("unexpected skipped: %v", res.Skipped)
+	}
+	if len(res.Module.Funcs) != 1 {
+		t.Fatalf("expected 1 func, got %d", len(res.Module.Funcs))
+	}
+}
+
+func TestProbeCryptoChacha20H(t *testing.T) {
+	src := `
+typedef unsigned char u8;
+typedef unsigned int u32;
+static const u8 *chacha20_constant = (const u8*)"expand 32-byte k";
+void crypto_wipe(void *secret, unsigned long size);
+#define WIPE_BUFFER(buffer) crypto_wipe(buffer, sizeof(buffer))
+void load32_le_buf (u32 *dst, const u8 *src, unsigned long size);
+void store32_le_buf(u8 *dst, const u32 *src, unsigned long size);
+void chacha20_rounds(u32 out[16], const u32 in[16]);
+
+void crypto_chacha20_h(u8 out[32], const u8 key[32], const u8 in [16])
+{
+	u32 block[16];
+	load32_le_buf(block     , chacha20_constant, 4);
+	load32_le_buf(block +  4, key              , 8);
+	load32_le_buf(block + 12, in               , 4);
+
+	chacha20_rounds(block, block);
+
+	store32_le_buf(out   , block   , 4);
+	store32_le_buf(out+16, block+12, 4);
+	WIPE_BUFFER(block);
+}
+`
+	res, err := front.ParsePartial(src, "probe_h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Skipped) > 0 {
+		t.Fatalf("unexpected skipped: %v", res.Skipped)
+	}
+}

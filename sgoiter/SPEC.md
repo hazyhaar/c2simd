@@ -103,19 +103,22 @@ Le code émis scalaire doit builder et passer ses KAT sous cette toolchain, exp�
 | CI | `ci_check` MultiBlock 1 KB + dogfood `sgoiter_out` + parity package |
 | Régén dogfood | `sgoiter/scripts/regen_monocypher_dogfood.sh` |
 
+Todos : `TODO_NEXT.md` (forme) · `TODO_NIGHT.md` (perf) · `TODO_EXTRA_LIBS.md` · secretstream V2 → `pkg/secretstream55/TODO_V2_SGOITER_LIBSODIUM.md` · **Monocypher complet sgoiter** → `TODO_MONOCYPHER_FULL.md`.
+
 ## 2bis. Marches
 
 1. ~~Tables 2D (blake2b)~~  
-2. ~~Tribench bit-exact~~ — **13/13** vs gcc -O2 ; libinjection no-oracle  
-3. Secretstream — format **libsodium-compatible** + backend AEAD sgoiter  
-4. ~~Qualité emit I1–I3 + Q10 + densify~~ — ROT plié, drop overrides, CRC 1 ligne  
-5. Strate SIMD (LE BUT) — kernels chauds (ChaCha20, Poly1305, AEAD) portés sur `simd/archsimd`
+2. ~~Tribench bit-exact~~ — **13/13** vs gcc -O2 (2026-08-13) ; libinjection no-oracle  
+3. Secretstream V2 — **libsodium-compatible** + backend AEAD sgoiter (c2simd = perf V1 dual) ; plan 2j dans `TODO_V2_SGOITER_LIBSODIUM.md`  
+4. ~~Qualité emit I1–I3 + Q10 + densify 2026-08-12~~ — ROT plié, drop overrides, CRC 1 ligne  
+5. Reste : perf (`TODO_NIGHT`) · forme P2/P3 (`TODO_NEXT`) · dogfood extra (`TODO_EXTRA_LIBS`)  
+6. Strate SIMD (LE BUT) — kernels chauds (ChaCha20, Poly1305, AEAD) portés sur `simd/archsimd`
    (Go 1.27, `GOEXPERIMENT=simd`) :
-   - Validés en noyaux dédiés avec garde `archsimd.X86.AVX2()` + fallback scalaire :
-     - **Patron 1 :** Projections vectorielles directes sans `StoreArray` sur pile (débit ChaCha > 2,30 Go/s).
-     - **Patron 2 :** Boucle fusionnée 1-pass micro-entrelacée par blocs de 256 octets (débit AEAD > 1,87 Go/s).
-     - **Patron 3 :** Réduction d'arité Poly1305 en limbs 64-bit saturés 6 mults/bloc (débit Poly > 3,93 Go/s).
-   - Parité bit-exact vs oracle C obligatoire pour chaque variante ; règles d'émissions ciblées dans `sgoiter/emit`.
+   - Validés en hands dans `pkg/monocypher55/` (`chacha20_simd_amd64.go`, `hand_poly1305_simd.go`, `hand_aead_fused.go`, avec garde `archsimd.X86.AVX2()` + fallback scalaire) :
+     - **Patron 1 :** Projections vectorielles directes sans `StoreArray` sur pile (`F-sgoiter-simd-direct-projections`, débit ChaCha 2,30 Go/s).
+     - **Patron 2 :** Boucle fusionnée 1-pass micro-entrelacée par blocs de 256 octets (`F-sgoiter-aead-fused-streaming-256b`, débit AEAD 1,87 Go/s).
+     - **Patron 3 :** Réduction d'arité Poly1305 en limbs 64-bit saturés 6 mults/bloc (`F-sgoiter-poly1305-radix64-reduction`, débit Poly 3,93 Go/s).
+   - Parité bit-exact vs oracle C obligatoire pour chaque variante ; règles d'émissions ciblées dans `sgoiter/emit` en perspective.
 
 ## 2ter. Banc tribench
 

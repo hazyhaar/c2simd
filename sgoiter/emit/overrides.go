@@ -33,9 +33,69 @@ func tryKernelOverride(f *ir.Func, e *env) (body string, skipStmts bool) {
 		return overrideSiphash(f, e), true
 	case "strlenspn_lab", "Strlenspn_lab":
 		return overrideStrlenspnLab(f, e), true
+	case "byte_copy_2", "Byte_copy_2", "byte_move_2", "Byte_move_2":
+		if len(f.Params) >= 2 {
+			return fmt.Sprintf("%scopy(%s[:2], %s[:2])\n", e.pad(), f.Params[0].Name, f.Params[1].Name), true
+		}
+	case "byte_copy_4", "Byte_copy_4", "byte_move_4", "Byte_move_4":
+		if len(f.Params) >= 2 {
+			return fmt.Sprintf("%scopy(%s[:4], %s[:4])\n", e.pad(), f.Params[0].Name, f.Params[1].Name), true
+		}
+	case "byte_copy_8", "Byte_copy_8", "byte_move_8", "Byte_move_8":
+		if len(f.Params) >= 2 {
+			return fmt.Sprintf("%scopy(%s[:8], %s[:8])\n", e.pad(), f.Params[0].Name, f.Params[1].Name), true
+		}
+	case "byte_copy_16", "Byte_copy_16", "byte_move_16", "Byte_move_16":
+		if len(f.Params) >= 2 {
+			return fmt.Sprintf("%scopy(%s[:16], %s[:16])\n", e.pad(), f.Params[0].Name, f.Params[1].Name), true
+		}
+	case "byte_move_forward", "Byte_move_forward":
+		if len(f.Params) >= 3 {
+			return fmt.Sprintf("%scopy(%s[:%s], %s[:%s])\n", e.pad(), f.Params[0].Name, f.Params[2].Name, f.Params[1].Name, f.Params[2].Name), true
+		}
+	case "f64_from_bits", "F64_from_bits":
+		if len(f.Params) >= 1 {
+			e.needMath = true
+			return fmt.Sprintf("%sreturn math.Float64frombits(%s)\n", e.pad(), f.Params[0].Name), true
+		}
+	case "f64_to_bits", "F64_to_bits":
+		if len(f.Params) >= 1 {
+			e.needMath = true
+			return fmt.Sprintf("%sreturn math.Float64bits(%s)\n", e.pad(), f.Params[0].Name), true
+		}
+	case "f32_from_bits", "F32_from_bits":
+		if len(f.Params) >= 1 {
+			e.needMath = true
+			return fmt.Sprintf("%sreturn math.Float32frombits(%s)\n", e.pad(), f.Params[0].Name), true
+		}
+	case "f32_to_bits", "F32_to_bits":
+		if len(f.Params) >= 1 {
+			e.needMath = true
+			return fmt.Sprintf("%sreturn math.Float32bits(%s)\n", e.pad(), f.Params[0].Name), true
+		}
+	case "mem_align_up", "Mem_align_up":
+		if len(f.Params) >= 2 {
+			return fmt.Sprintf("%soff := Size_align_up(0, %s)\n%sif int(off) < len(%s) {\n%s\treturn %s[off:]\n%s}\n%sreturn %s\n",
+				e.pad(), f.Params[1].Name, e.pad(), f.Params[0].Name, e.pad(), f.Params[0].Name, e.pad(), e.pad(), f.Params[0].Name), true
+		}
+	case "u128_mul", "U128_mul":
+		if len(f.Params) >= 4 {
+			e.needBits = true
+			return fmt.Sprintf("%s*%s, *%s = bits.Mul64(%s, %s)\n", e.pad(), f.Params[2].Name, f.Params[3].Name, f.Params[0].Name, f.Params[1].Name), true
+		}
+	case "u128_mul_add", "U128_mul_add":
+		if len(f.Params) >= 5 {
+			e.needBits = true
+			return fmt.Sprintf("%sh, l := bits.Mul64(%s, %s)\n%svar carry uint64\n%s*%s, carry = bits.Add64(l, %s, 0)\n%s*%s = h + carry\n",
+				e.pad(), f.Params[0].Name, f.Params[1].Name,
+				e.pad(),
+				e.pad(), f.Params[4].Name, f.Params[2].Name,
+				e.pad(), f.Params[3].Name), true
+		}
 	default:
 		return "", false
 	}
+	return "", false
 }
 
 func overrideStrlenspnLab(f *ir.Func, e *env) string {
@@ -337,24 +397,24 @@ func overrideBase64(f *ir.Func, e *env) string {
 	fmt.Fprintf(&b, "%sfor ; i+2 < n; i += 3 {\n", pad)
 	fmt.Fprintf(&b, "%s\tv := uint32(%s[i])<<16 | uint32(%s[i+1])<<8 | uint32(%s[i+2])\n", pad, src, src, src)
 	fmt.Fprintf(&b, "%s\to := %s[j : j+4]\n", pad, dst)
-	fmt.Fprintf(&b, "%s\to[0] = b64_table[(v>>18)&63]\n", pad)
-	fmt.Fprintf(&b, "%s\to[1] = b64_table[(v>>12)&63]\n", pad)
-	fmt.Fprintf(&b, "%s\to[2] = b64_table[(v>>6)&63]\n", pad)
-	fmt.Fprintf(&b, "%s\to[3] = b64_table[v&63]\n", pad)
+	fmt.Fprintf(&b, "%s\to[0] = B64_table[(v>>18)&63]\n", pad)
+	fmt.Fprintf(&b, "%s\to[1] = B64_table[(v>>12)&63]\n", pad)
+	fmt.Fprintf(&b, "%s\to[2] = B64_table[(v>>6)&63]\n", pad)
+	fmt.Fprintf(&b, "%s\to[3] = B64_table[v&63]\n", pad)
 	fmt.Fprintf(&b, "%s\tj += 4\n", pad)
 	fmt.Fprintf(&b, "%s}\n", pad)
 	fmt.Fprintf(&b, "%sif i < n {\n", pad)
 	fmt.Fprintf(&b, "%s\tv := uint32(%s[i]) << 16\n", pad, src)
 	fmt.Fprintf(&b, "%s\tif i+1 < n {\n", pad)
 	fmt.Fprintf(&b, "%s\t\tv |= uint32(%s[i+1]) << 8\n", pad, src)
-	fmt.Fprintf(&b, "%s\t\t%s[j] = b64_table[(v>>18)&63]\n", pad, dst)
-	fmt.Fprintf(&b, "%s\t\t%s[j+1] = b64_table[(v>>12)&63]\n", pad, dst)
-	fmt.Fprintf(&b, "%s\t\t%s[j+2] = b64_table[(v>>6)&63]\n", pad, dst)
+	fmt.Fprintf(&b, "%s\t\t%s[j] = B64_table[(v>>18)&63]\n", pad, dst)
+	fmt.Fprintf(&b, "%s\t\t%s[j+1] = B64_table[(v>>12)&63]\n", pad, dst)
+	fmt.Fprintf(&b, "%s\t\t%s[j+2] = B64_table[(v>>6)&63]\n", pad, dst)
 	fmt.Fprintf(&b, "%s\t\t%s[j+3] = '='\n", pad, dst)
 	fmt.Fprintf(&b, "%s\t\tj += 4\n", pad)
 	fmt.Fprintf(&b, "%s\t} else {\n", pad)
-	fmt.Fprintf(&b, "%s\t\t%s[j] = b64_table[(v>>18)&63]\n", pad, dst)
-	fmt.Fprintf(&b, "%s\t\t%s[j+1] = b64_table[(v>>12)&63]\n", pad, dst)
+	fmt.Fprintf(&b, "%s\t\t%s[j] = B64_table[(v>>18)&63]\n", pad, dst)
+	fmt.Fprintf(&b, "%s\t\t%s[j+1] = B64_table[(v>>12)&63]\n", pad, dst)
 	fmt.Fprintf(&b, "%s\t\t%s[j+2] = '='\n", pad, dst)
 	fmt.Fprintf(&b, "%s\t\t%s[j+3] = '='\n", pad, dst)
 	fmt.Fprintf(&b, "%s\t\tj += 4\n", pad)

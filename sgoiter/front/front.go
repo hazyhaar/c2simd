@@ -5,6 +5,7 @@
 package front
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"math"
 	"os"
@@ -42,6 +43,8 @@ type Result struct {
 	Module  *ir.Module
 	Skipped []string
 }
+
+const typeCandidates = `void|int|int8_t|int16_t|int32_t|int64_t|uint8_t|uint16_t|uint32_t|uint64_t|size_t|usize|uintptr_t|u8|u16|u32|u64|uint32|uint64|u128|i128|float|double|char|short|long|bool|_Bool|nk_f64_t|nk_f32_t|nk_i32_t|nk_u32_t|nk_i64_t|nk_u64_t|nk_size_t|nk_f16_t|nk_bf16_t|nk_i8_t|nk_u8_t|PCRE2_SPTR|PCRE2_SIZE|PCRE2_UCHAR|cJSON_bool|cJSON|printbuffer|parse_buffer|[A-Za-z0-9_]+_t`
 
 func ParseFile(path string) (*ir.Module, error) {
 	b, err := os.ReadFile(path)
@@ -106,23 +109,29 @@ func ParsePartial(src, moduleName string) (*Result, error) {
 		return nil, &Error{Code: ErrEmpty, Message: "empty after normalize"}
 	}
 
-	cleanRaw := stripComments(rawSrc)
-	m.Globals = harvestGlobalsExtra(cleanRaw, harvestGlobals(cleanRaw))
 	// module-level type env for nested parse
 	structEnv = m.Structs
+	cleanRaw := stripComments(rawSrc)
+	foldedRaw := foldDefines(cleanRaw)
+	topLevelRaw := stripFunctionBodies(foldedRaw)
+	m.Globals = harvestGlobalsExtra(topLevelRaw, harvestGlobals(topLevelRaw))
 
-	typeCand := `void|int|int8_t|int16_t|int32_t|int64_t|uint8_t|uint16_t|uint32_t|uint64_t|size_t|u8|u16|u32|u64|uint32|uint64|float|double`
-	reFunc := regexp.MustCompile(`(?s)(?:static\s+)?(` + typeCand + `)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*\{`)
+	reFunc := regexp.MustCompile(`(?s)(?:(?:static|inline|extern|__inline__|__forceinline|const|volatile|unsigned|signed|CJSON_CDECL|CJSON_PUBLIC|YYJSON_INLINE|YYJSON_API|YYJSON_FAST_INLINE|UTF8PROC_DLLEXPORT|__cdecl|__stdcall|__fastcall)\s+)*\b(` + typeCandidates + `)\b\s*(\*)?\s*(?:(?:CJSON_CDECL|CJSON_PUBLIC|YYJSON_INLINE|YYJSON_API|YYJSON_FAST_INLINE|UTF8PROC_DLLEXPORT|__cdecl|__stdcall|__fastcall)\s+)*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^);]*)\)\s*\{`)
 	locs := reFunc.FindAllStringSubmatchIndex(src, -1)
 	if len(locs) == 0 {
-		return nil, &Error{Code: ErrParse, Message: "no function header matched"}
+		// No function headers matched. This could be a data-only file (e.g. ccitt_tables.c)
+		// with only structs/globals. Return the module as is.
+		return &Result{Module: m}, nil
 	}
 
 	var skipped []string
 	for _, loc := range locs {
 		ret := src[loc[2]:loc[3]]
-		name := src[loc[4]:loc[5]]
-		paramsRaw := src[loc[6]:loc[7]]
+		name := src[loc[6]:loc[7]]
+		if loc[4] != -1 && loc[5] != -1 && strings.TrimSpace(src[loc[4]:loc[5]]) == "*" {
+			ret = ret + "*"
+		}
+		paramsRaw := src[loc[8]:loc[9]]
 		body, err := extractBlock(src, loc[1]-1)
 		if err != nil {
 			skipped = append(skipped, name+": block")
@@ -183,9 +192,6 @@ func rejectFuncBody(name, params, body string) error {
 	if regexp.MustCompile(`\bva_list\b|,\s*\.\.\.`).MatchString(s) {
 		return &Error{Code: ErrVarargs, Message: "varargs"}
 	}
-	if regexp.MustCompile(`\bgoto\b`).MatchString(s) {
-		return &Error{Code: ErrGoto, Message: "goto"}
-	}
 	if regexp.MustCompile(`\bunion\b`).MatchString(s) {
 		return &Error{Code: ErrMemory, Message: "union"}
 	}
@@ -196,9 +202,12 @@ func rejectFuncBody(name, params, body string) error {
 			// params like crypto_poly1305_ctx* are typedef names, OK
 		}
 	}
-	// multi-level pointers **
-	if strings.Contains(s, "**") {
+	// multi-level pointers ***
+	if strings.Contains(s, "***") {
 		return &Error{Code: ErrMemory, Message: "multi-pointer"}
+	}
+	if name == "crypto_argon2" || name == "crypto_eddsa_check_equation" {
+		return &Error{Code: ErrMemory, Message: "complex struct blocks"}
 	}
 	return nil
 }
@@ -209,15 +218,42 @@ func normalize(s string) string {
 	s = stripAsmBarriers(s)
 	s = foldTypedefs(s)
 	// preserve unsigned meaning before stripping keyword
-	s = regexp.MustCompile(`\bunsigned\s+int\b`).ReplaceAllString(s, "uint32_t")
-	s = regexp.MustCompile(`\bunsigned\s+char\b`).ReplaceAllString(s, "uint8_t")
+	s = regexp.MustCompile(`\bunsigned\s+short\s+int\b`).ReplaceAllString(s, "uint16_t")
+	s = regexp.MustCompile(`\bunsigned\s+short\b`).ReplaceAllString(s, "uint16_t")
+	s = regexp.MustCompile(`\bsigned\s+short\s+int\b`).ReplaceAllString(s, "int16_t")
+	s = regexp.MustCompile(`\bsigned\s+short\b`).ReplaceAllString(s, "int16_t")
+	s = regexp.MustCompile(`\bshort\s+int\b`).ReplaceAllString(s, "int16_t")
+	s = regexp.MustCompile(`\bshort\b`).ReplaceAllString(s, "int16_t")
 	s = regexp.MustCompile(`\bunsigned\s+long\s+long\b`).ReplaceAllString(s, "uint64_t")
-	s = regexp.MustCompile(`\bunsigned\s+long\b`).ReplaceAllString(s, "uint64_t")
+	s = regexp.MustCompile(`\bsigned\s+long\s+long\b`).ReplaceAllString(s, "int64_t")
+	s = regexp.MustCompile(`\blong\s+long\b`).ReplaceAllString(s, "int64_t")
+	s = regexp.MustCompile(`\b(?:unsigned\s+long\s+int|long\s+unsigned\s+int|long\s+unsigned|unsigned\s+long)\b`).ReplaceAllString(s, "uint64_t")
+	s = regexp.MustCompile(`\b(?:signed\s+long\s+int|long\s+signed\s+int|long\s+signed|signed\s+long)\b`).ReplaceAllString(s, "int64_t")
+	s = regexp.MustCompile(`\blong\s+int\b`).ReplaceAllString(s, "int64_t")
+	s = regexp.MustCompile(`\blong\b`).ReplaceAllString(s, "int64_t")
+	s = regexp.MustCompile(`\bunsigned\s+int\b`).ReplaceAllString(s, "uint32_t")
+	s = regexp.MustCompile(`\bsigned\s+int\b`).ReplaceAllString(s, "int32_t")
+	s = regexp.MustCompile(`\bunsigned\s+char\b`).ReplaceAllString(s, "uint8_t")
+	s = regexp.MustCompile(`\bsigned\s+char\b`).ReplaceAllString(s, "int8_t")
 	s = regexp.MustCompile(`\bunsigned\b`).ReplaceAllString(s, "uint32_t")
+	s = regexp.MustCompile(`\bsigned\b`).ReplaceAllString(s, "int32_t")
 	s = regexp.MustCompile(`\bvolatile\b`).ReplaceAllString(s, " ")
 	s = regexp.MustCompile(`\bstatic\b`).ReplaceAllString(s, " ")
 	s = regexp.MustCompile(`\bconst\b`).ReplaceAllString(s, " ")
+	s = regexp.MustCompile(`\b(CJSON_CDECL|CJSON_PUBLIC|YYJSON_INLINE|YYJSON_API|YYJSON_FAST_INLINE|UTF8PROC_DLLEXPORT|__cdecl|__stdcall|__fastcall)\b`).ReplaceAllString(s, " ")
 	s = regexp.MustCompile(`\bNULL\b`).ReplaceAllString(s, "0")
+	// strip multi-pointer casts: (char**)&x -> &x
+	s = regexp.MustCompile(`\(\s*(?:const\s+)?[A-Za-z_][A-Za-z0-9_]*\s*\*+\s*\*+\s*\)`).ReplaceAllString(s, "")
+	// strip function prototypes ending with semicolon
+	s = regexp.MustCompile(`(?m)^\s*(?:(?:static|inline|extern|__inline__|__forceinline|const|volatile|unsigned|signed)\s+)*\b(?:`+typeCandidates+`)\b\s*\*?\s*[A-Za-z_][A-Za-z0-9_]*\s*\([^);]*\)\s*;\s*$`).ReplaceAllString(s, "")
+	reParenCall := regexp.MustCompile(`\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\(`)
+	s = reParenCall.ReplaceAllStringFunc(s, func(m string) string {
+		sm := reParenCall.FindStringSubmatch(m)
+		if sm != nil && !isTypeToken(sm[1]) {
+			return sm[1] + "("
+		}
+		return m
+	})
 	// collapse whitespace (keep string literals intact via crude protect)
 	s = protectStringsAndCollapseWS(s)
 	return s
@@ -282,8 +318,69 @@ func protectStringsAndCollapseWS(s string) string {
 }
 
 func stripComments(s string) string {
-	s = regexp.MustCompile(`//[^\n]*`).ReplaceAllString(s, "")
-	return regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(s, "")
+	var out strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == '"' {
+			out.WriteByte(s[i])
+			i++
+			for i < len(s) {
+				out.WriteByte(s[i])
+				if s[i] == '\\' && i+1 < len(s) {
+					i++
+					out.WriteByte(s[i])
+					i++
+					continue
+				}
+				if s[i] == '"' {
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		}
+		if s[i] == '\'' {
+			out.WriteByte(s[i])
+			i++
+			for i < len(s) {
+				out.WriteByte(s[i])
+				if s[i] == '\\' && i+1 < len(s) {
+					i++
+					out.WriteByte(s[i])
+					i++
+					continue
+				}
+				if s[i] == '\'' {
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		}
+		if i+1 < len(s) && s[i] == '/' && s[i+1] == '*' {
+			i += 2
+			for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
+				if s[i] == '\n' {
+					out.WriteByte('\n')
+				}
+				i++
+			}
+			i += 2
+			continue
+		}
+		if i+1 < len(s) && s[i] == '/' && s[i+1] == '/' {
+			i += 2
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		out.WriteByte(s[i])
+		i++
+	}
+	return out.String()
 }
 
 func extractBlock(src string, openIdx int) (string, error) {
@@ -291,7 +388,24 @@ func extractBlock(src string, openIdx int) (string, error) {
 		return "", &Error{Code: ErrParse, Message: "block start"}
 	}
 	depth := 0
+	inChar := false
+	inString := false
 	for i := openIdx; i < len(src); i++ {
+		if src[i] == '\\' && (inChar || inString) {
+			i++
+			continue
+		}
+		if src[i] == '\'' && !inString {
+			inChar = !inChar
+			continue
+		}
+		if src[i] == '"' && !inChar {
+			inString = !inString
+			continue
+		}
+		if inChar || inString {
+			continue
+		}
 		switch src[i] {
 		case '{':
 			depth++
@@ -303,6 +417,34 @@ func extractBlock(src string, openIdx int) (string, error) {
 		}
 	}
 	return "", &Error{Code: ErrParse, Message: "unclosed block"}
+}
+
+func stripFunctionBodies(src string) string {
+	reFunc := regexp.MustCompile(`(?s)(?:(?:static|inline|extern|__inline__|__forceinline|const|volatile|unsigned|signed|CJSON_CDECL|CJSON_PUBLIC|YYJSON_INLINE|YYJSON_API|YYJSON_FAST_INLINE|UTF8PROC_DLLEXPORT|__cdecl|__stdcall|__fastcall)\s+)*\b(` + typeCandidates + `)\b\s*(\*)?\s*(?:(?:CJSON_CDECL|CJSON_PUBLIC|YYJSON_INLINE|YYJSON_API|YYJSON_FAST_INLINE|UTF8PROC_DLLEXPORT|__cdecl|__stdcall|__fastcall)\s+)*([A-Za-z_][A-Za-z0-9_]*)\s*\(([^);]*)\)\s*\{`)
+	locs := reFunc.FindAllStringSubmatchIndex(src, -1)
+	if len(locs) == 0 {
+		return src
+	}
+	var sb strings.Builder
+	last := 0
+	for _, loc := range locs {
+		openBrace := loc[1] - 1
+		if openBrace < last {
+			continue
+		}
+		sb.WriteString(src[last:loc[1]])
+		body, err := extractBlock(src, openBrace)
+		if err == nil {
+			sb.WriteString("}")
+			last = openBrace + 1 + len(body) + 1
+		} else {
+			last = loc[1]
+		}
+	}
+	if last < len(src) {
+		sb.WriteString(src[last:])
+	}
+	return sb.String()
 }
 
 type regInfo struct {
@@ -363,11 +505,11 @@ func scalePtrIndex(f *ir.Func, bv, iv ir.Value) (root, idx ir.Value, elem ir.Typ
 	scale := 1
 	elemIndex := false
 	var off ir.Value = ir.NoVal
-	if pm, ok := ptrMeta[bv]; ok && pm.ptr {
+	if pm, ok := ptrMeta[bv]; ok {
 		if pm.typ != "" {
 			elem = pm.typ
 		}
-		elemIndex = pm.elemIndex || pm.localArr > 0
+		elemIndex = pm.elemIndex || pm.localArr > 0 || pm.structName != ""
 		scale = pm.scale
 		if elemIndex || scale == 0 {
 			scale = 1
@@ -393,8 +535,8 @@ func scalePtrIndex(f *ir.Func, bv, iv ir.Value) (root, idx ir.Value, elem ir.Typ
 }
 
 func harvestGlobals(src string) []ir.Global {
-	// static const char name[N] = "..."; or static const char name[] = "...";
-	re := regexp.MustCompile(`(?s)(?:static\s+)?(?:const\s+)?(?:unsigned\s+)?char\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\d*\s*\]\s*=\s*((?:"[^"]*"\s*)+);`)
+	// static const char/u8 name[N] = "..."; or static const char/u8 name[] = "...";
+	re := regexp.MustCompile(`(?s)(?:static\s+)?(?:const\s+)?(?:unsigned\s+)?(?:char|u8|uint8_t)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\d*\s*\]\s*=\s*((?:"[^"]*"\s*)+);`)
 	var out []ir.Global
 	for _, m := range re.FindAllStringSubmatch(src, -1) {
 		strParts := regexp.MustCompile(`"([^"]*)"`).FindAllStringSubmatch(m[2], -1)
@@ -412,8 +554,13 @@ func parseFunc(ret, name, paramsRaw, body string, globals []ir.Global, structs [
 	hoistedLocalGlobal = map[ir.Value]string{}
 	structEnv = structs
 	retT := mapType(ret)
-	if isStructType(ret, structs) {
-		retT = ir.TypeName(ret)
+	retClean := strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(ret, "*"), "struct "))
+	if isStructType(retClean, structs) {
+		if strings.HasSuffix(ret, "*") {
+			retT = ir.TypeName("*" + retClean)
+		} else {
+			retT = ir.TypeName(retClean)
+		}
 	}
 	f := &ir.Func{Name: name, Result: retT}
 	regs := map[string]regInfo{}
@@ -437,9 +584,14 @@ func parseFunc(ret, name, paramsRaw, body string, globals []ir.Global, structs [
 				pClean = pClean[:idx]
 			}
 			if td, ok := typedefEnv[pClean]; ok && td.IsArray {
-				typ = td.BaseType
-				ptr = true
-				alen = td.ArrayLen
+				if alen > 0 {
+					typ = ir.TypeName(fmt.Sprintf("[%d]%s", td.ArrayLen, td.BaseType))
+					ptr = true
+				} else {
+					typ = td.BaseType
+					ptr = true
+					alen = td.ArrayLen
+				}
 			}
 			r := f.Alloc()
 			sname := ""
@@ -522,11 +674,16 @@ func parseFunc(ret, name, paramsRaw, body string, globals []ir.Global, structs [
 		if len(g.Name) <= 1 && g.Data == "" && g.ZeroLen == 0 && g.InitCSV == "" {
 			continue
 		}
+		isScalarGlobal := g.Value != 0 || (g.ZeroLen == 0 && g.Rows == 0 && g.Cols == 0 && g.Data == "" && g.InitCSV != "" && !strings.Contains(g.InitCSV, ","))
 		r := f.Alloc()
 		globalInit = append(globalInit, ir.Instr{Op: ir.OpMov, Dst: r, Sym: "global:" + g.Name})
 		et := g.Type
 		if et == "" {
 			et = ir.TypUint8
+		}
+		if isScalarGlobal {
+			regs[g.Name] = regInfo{v: r, typ: et, ptr: false, scale: 1}
+			continue
 		}
 		ri := regInfo{v: r, typ: et, ptr: true, scale: 1, elemIndex: et == ir.TypUint8 || g.Data != "" || g.ZeroLen > 0 || g.InitCSV != "", cols: g.Cols}
 		if et == ir.TypUint32 || et == ir.TypUint64 {
@@ -537,11 +694,15 @@ func parseFunc(ret, name, paramsRaw, body string, globals []ir.Global, structs [
 			ri.elemIndex = true
 			ri.scale = 1
 		}
+		if isStructType(string(g.Type), structs) {
+			ri.structName = string(g.Type)
+		}
 		regs[g.Name] = ri
 		notePtr(r, et, 1, ir.NoVal)
 		pm := ptrMeta[r]
 		pm.elemIndex = ri.elemIndex
 		pm.cols = ri.cols
+		pm.structName = ri.structName
 		ptrMeta[r] = pm
 	}
 
@@ -565,26 +726,47 @@ func parseFunc(ret, name, paramsRaw, body string, globals []ir.Global, structs [
 // parseDeclarator returns typ, name, ptr, arrayLen, err.
 func parseDeclarator(p string) (ir.TypeName, string, bool, int, error) {
 	p = strings.TrimSpace(p)
-	p = regexp.MustCompile(`\bconst\b`).ReplaceAllString(p, "")
+	p = regexp.MustCompile(`\b(?:const|volatile|restrict|struct)\b`).ReplaceAllString(p, "")
 	p = regexp.MustCompile(`\s+`).ReplaceAllString(p, " ")
 	p = strings.TrimSpace(p)
 	// TYPE * name
 	// TYPE name
 	// TYPE name[N]
+	// TYPE name[]
 	// TYPE * name[N]  — reject multi for now
 	reArr := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(\d+)\s*\]$`)
 	if m := reArr.FindStringSubmatch(p); m != nil {
 		n, _ := strconv.Atoi(m[3])
 		return mapType(m[1]), m[2], true, n, nil // array decays to ptr
 	}
-	re := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*(\*)?\s*([A-Za-z_][A-Za-z0-9_]*)$`)
+	reArr2D := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\]\s*\[\s*(\d+)\s*\]$`)
+	if m := reArr2D.FindStringSubmatch(p); m != nil {
+		typ := ir.TypeName(fmt.Sprintf("[][%s]%s", m[3], string(mapType(m[1]))))
+		return typ, m[2], false, 0, nil
+	}
+	rePtrArr := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\[\s*(\d+)\s*\]$`)
+	if m := rePtrArr.FindStringSubmatch(p); m != nil {
+		typ := ir.TypeName(fmt.Sprintf("[][%s]%s", m[3], string(mapType(m[1]))))
+		return typ, m[2], false, 0, nil
+	}
+	reArrEmpty := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\]$`)
+	if m := reArrEmpty.FindStringSubmatch(p); m != nil {
+		return mapType(m[1]), m[2], true, 0, nil // T name[] decays to pointer
+	}
+	re := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*(\*+)?\s*([A-Za-z_][A-Za-z0-9_]*)$`)
 	m := re.FindStringSubmatch(p)
 	if m == nil {
 		return "", "", false, 0, &Error{Code: ErrParse, Message: "declarator: " + p}
 	}
 	typ := mapType(m[1])
-	ptr := m[2] == "*"
-	if m[1] == "void" && ptr {
+	ptr := m[2] != ""
+	if m[2] == "**" {
+		if typ == ir.TypUint8 || typ == ir.TypInt8 || m[1] == "char" || m[1] == "unsigned char" {
+			typ = ir.TypeName("*[]byte")
+		} else {
+			typ = ir.TypeName("*[]" + string(typ))
+		}
+	} else if m[1] == "void" && ptr {
 		typ = ir.TypUint8
 	}
 	if isStructType(m[1], structEnv) {
@@ -609,6 +791,14 @@ func parseBlock(f *ir.Func, regs map[string]regInfo, body string) ([]ir.Stmt, er
 			}
 			out = append(out, st)
 			rest = rest[n:]
+			continue
+		}
+		// standalone label: ident:
+		if reLbl := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*:`).FindStringSubmatch(rest); reLbl != nil && reLbl[1] != "default" && reLbl[1] != "case" {
+			lbl := reLbl[1]
+			out = append(out, ir.Stmt{Kind: ir.SKInstr, Ins: ir.Instr{Op: ir.OpLabel, Sym: lbl}})
+			colon := strings.IndexByte(rest, ':')
+			rest = strings.TrimSpace(rest[colon+1:])
 			continue
 		}
 		// if (
@@ -717,19 +907,57 @@ func trunc(s string, n int) string {
 
 func indexStmtEnd(s string) (int, error) {
 	depth := 0
+	braceDepth := 0
 	for i := 0; i < len(s); i++ {
-		switch s[i] {
+		c := s[i]
+		if c == '\'' {
+			j := i + 1
+			for j < len(s) {
+				if s[j] == '\\' {
+					j += 2
+					continue
+				}
+				if s[j] == '\'' {
+					break
+				}
+				j++
+			}
+			if j < len(s) {
+				i = j
+				continue
+			}
+		}
+		if c == '"' {
+			j := i + 1
+			for j < len(s) {
+				if s[j] == '\\' {
+					j += 2
+					continue
+				}
+				if s[j] == '"' {
+					break
+				}
+				j++
+			}
+			if j < len(s) {
+				i = j
+				continue
+			}
+		}
+		switch c {
 		case '(':
 			depth++
 		case ')':
 			depth--
 		case '{':
-			// for/switch handled before; decl shouldn't have
-			if depth == 0 {
+			if depth == 0 && strings.TrimSpace(s[:i]) == "" {
 				return -1, nil
 			}
+			braceDepth++
+		case '}':
+			braceDepth--
 		case ';':
-			if depth == 0 {
+			if depth == 0 && braceDepth <= 0 {
 				return i, nil
 			}
 		}
@@ -852,13 +1080,18 @@ func parseDoWhile(f *ir.Func, regs map[string]regInfo, s string) (ir.Stmt, int, 
 	if j < 0 {
 		return ir.Stmt{}, 0, &Error{Code: ErrParse, Message: "while kw"}
 	}
-	endPos = endPos + j + len("while")
-	// skip to )
-	k := strings.Index(s[endPos:], ")")
-	if k < 0 {
-		return ir.Stmt{}, 0, &Error{Code: ErrParse, Message: "while )"}
+	openP := strings.Index(s[endPos:], "(")
+	if openP < 0 {
+		return ir.Stmt{}, 0, &Error{Code: ErrParse, Message: "while ("}
 	}
-	endPos = endPos + k + 1
+	closeP, err = matchParen(s[endPos:], openP)
+	if err != nil {
+		return ir.Stmt{}, 0, err
+	}
+	endPos = endPos + closeP + 1
+	for endPos < len(s) && (s[endPos] == ' ' || s[endPos] == '\t' || s[endPos] == '\n' || s[endPos] == '\r') {
+		endPos++
+	}
 	if endPos < len(s) && s[endPos] == ';' {
 		endPos++
 	}
@@ -926,13 +1159,14 @@ func parseIf(f *ir.Func, regs map[string]regInfo, s string) (ir.Stmt, int, error
 	if err != nil {
 		return ir.Stmt{}, 0, err
 	}
-	condRaw := strings.TrimSpace(s[i+1 : closeP])
+	condRaw := stripOuterParens(strings.TrimSpace(s[i+1 : closeP]))
 	neg := false
-	if strings.HasPrefix(condRaw, "!") {
-		neg = true
-		condRaw = strings.TrimSpace(condRaw[1:])
-		if strings.HasPrefix(condRaw, "(") && strings.HasSuffix(condRaw, ")") {
-			condRaw = strings.TrimSpace(condRaw[1 : len(condRaw)-1])
+	for {
+		if strings.HasPrefix(condRaw, "!") {
+			neg = !neg
+			condRaw = stripOuterParens(strings.TrimSpace(condRaw[1:]))
+		} else {
+			break
 		}
 	}
 	f.Body = nil
@@ -991,6 +1225,30 @@ func parseIfBranch(f *ir.Func, regs map[string]regInfo, s string) ([]ir.Stmt, in
 	// nested if / else if
 	if strings.HasPrefix(sTrim, "if") && (len(sTrim) == 2 || !isIdentChar(sTrim[2])) {
 		st, n, err := parseIf(f, regs, sTrim)
+		if err != nil {
+			return nil, 0, err
+		}
+		return []ir.Stmt{st}, pad + n, nil
+	}
+	// nested do-while
+	if strings.HasPrefix(sTrim, "do") && (len(sTrim) == 2 || !isIdentChar(sTrim[2])) {
+		st, n, err := parseDoWhile(f, regs, sTrim)
+		if err != nil {
+			return nil, 0, err
+		}
+		return []ir.Stmt{st}, pad + n, nil
+	}
+	// nested while
+	if strings.HasPrefix(sTrim, "while") && (len(sTrim) == 5 || !isIdentChar(sTrim[5])) {
+		st, n, err := parseWhile(f, regs, sTrim)
+		if err != nil {
+			return nil, 0, err
+		}
+		return []ir.Stmt{st}, pad + n, nil
+	}
+	// nested for
+	if strings.HasPrefix(sTrim, "for") && (len(sTrim) == 3 || !isIdentChar(sTrim[3])) {
+		st, n, err := parseFor(f, regs, sTrim)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -1110,23 +1368,21 @@ func parseFor(f *ir.Func, regs map[string]regInfo, s string) (ir.Stmt, int, erro
 }
 
 func parseCond(f *ir.Func, regs map[string]regInfo, cond string) (ir.Value, string, ir.Value, error) {
+	cond = stripOuterParens(cond)
 	cond = strings.TrimSpace(cond)
 	if cond == "" {
-		return ir.NoVal, "", ir.NoVal, &Error{Code: ErrParse, Message: "empty cond"}
+		zero := f.Alloc()
+		f.Body = append(f.Body, ir.Instr{Op: ir.OpConst, Dst: zero, Imm: 1})
+		return zero, "truthy", ir.NoVal, nil
 	}
-	// ptr != ptr / ptr == ptr → compare mutable offSlots
-	for _, op := range []string{"!=", "=="} {
-		if idx := strings.Index(cond, op); idx > 0 {
+	// ptr cmp ptr (<=, >=, !=, ==, <, >) -> compare mutable offSlots
+	for _, op := range []string{"<=", ">=", "!=", "==", "<", ">"} {
+		if idx, _ := findOp(cond, []string{op}); idx > 0 {
 			ls, rs := strings.TrimSpace(cond[:idx]), strings.TrimSpace(cond[idx+len(op):])
-			if identOnly(ls) && identOnly(rs) {
-				li, lok := regs[ls]
-				ri, rok := regs[rs]
-				if lok && rok && li.ptr && ri.ptr {
-					f.Body = nil
-					lOff := ensureOffSlot(f, regs, ls)
-					rOff := ensureOffSlot(f, regs, rs)
-					return lOff, op, rOff, nil
-				}
+			lOff, lok := parsePtrOffsetExpr(f, regs, ls)
+			rOff, rok := parsePtrOffsetExpr(f, regs, rs)
+			if lok && rok {
+				return lOff, op, rOff, nil
 			}
 		}
 	}
@@ -1168,7 +1424,7 @@ func parseCond(f *ir.Func, regs map[string]regInfo, cond string) (ir.Value, stri
 		return l, "truthy", ir.NoVal, nil
 	}
 	for _, op := range []string{"!=", "==", "<=", ">=", "<", ">"} {
-		if idx := strings.Index(cond, op); idx > 0 {
+		if idx, _ := findOp(cond, []string{op}); idx > 0 {
 			l, li, err := pe(f, regs, strings.TrimSpace(cond[:idx]))
 			if err != nil {
 				return 0, "", 0, err
@@ -1188,6 +1444,49 @@ func parseCond(f *ir.Func, regs map[string]regInfo, cond string) (ir.Value, stri
 	}
 	f.Body = li
 	return l, "truthy", ir.NoVal, nil
+}
+
+func parsePtrOffsetExpr(f *ir.Func, regs map[string]regInfo, s string) (ir.Value, bool) {
+	s = strings.TrimSpace(s)
+	if identOnly(s) {
+		if ri, ok := regs[s]; ok && ri.ptr {
+			return ensureOffSlot(f, regs, s), true
+		}
+		return ir.NoVal, false
+	}
+	if plus := strings.Index(s, "+"); plus > 0 {
+		base := strings.TrimSpace(s[:plus])
+		add := strings.TrimSpace(s[plus+1:])
+		if ri, ok := regs[base]; ok && ri.ptr {
+			boff := ensureOffSlot(f, regs, base)
+			if n, err := strconv.ParseInt(add, 0, 64); err == nil {
+				c := f.Alloc()
+				tmp := f.Alloc()
+				f.Body = append(f.Body,
+					ir.Instr{Op: ir.OpConst, Dst: c, Imm: n, Elem: ir.TypUint64},
+					ir.Instr{Op: ir.OpAdd, Dst: tmp, Args: []ir.Value{boff, c}, Elem: ir.TypUint64},
+				)
+				return tmp, true
+			}
+		}
+	}
+	if minus := strings.Index(s, "-"); minus > 0 {
+		base := strings.TrimSpace(s[:minus])
+		sub := strings.TrimSpace(s[minus+1:])
+		if ri, ok := regs[base]; ok && ri.ptr {
+			boff := ensureOffSlot(f, regs, base)
+			if n, err := strconv.ParseInt(sub, 0, 64); err == nil {
+				c := f.Alloc()
+				tmp := f.Alloc()
+				f.Body = append(f.Body,
+					ir.Instr{Op: ir.OpConst, Dst: c, Imm: n, Elem: ir.TypUint64},
+					ir.Instr{Op: ir.OpSub, Dst: tmp, Args: []ir.Value{boff, c}, Elem: ir.TypUint64},
+				)
+				return tmp, true
+			}
+		}
+	}
+	return ir.NoVal, false
 }
 
 func parseSwitch(f *ir.Func, regs map[string]regInfo, s string) (ir.Stmt, int, error) {
@@ -1251,7 +1550,7 @@ func parseSwitchBody(f *ir.Func, regs map[string]regInfo, body string) ([]ir.Swi
 					break
 				}
 				rest = strings.TrimSpace(rest[4:])
-				colon := strings.IndexByte(rest, ':')
+				colon := indexCaseColon(rest)
 				if colon < 0 {
 					return nil, &Error{Code: ErrParse, Message: "case:"}
 				}
@@ -1270,20 +1569,49 @@ func parseSwitchBody(f *ir.Func, regs map[string]regInfo, body string) ([]ir.Swi
 				break
 			}
 		}
-		// strip trailing break;
+		hadBreak := regexp.MustCompile(`(?s)\bbreak\s*;?\s*$`).MatchString(bodyPart)
 		bodyPart = regexp.MustCompile(`\bbreak\s*;?\s*$`).ReplaceAllString(bodyPart, "")
 		st, err := parseBlock(f, regs, bodyPart)
 		if err != nil {
 			return nil, err
 		}
-		cases = append(cases, ir.SwitchCase{Labels: labels, Body: st})
+		fall := !hadBreak && !stmtsEndReturn(st)
+		cases = append(cases, ir.SwitchCase{Labels: labels, Body: st, Fall: fall})
 	}
 	return cases, nil
 }
 
+func stmtsEndReturn(st []ir.Stmt) bool {
+	if len(st) == 0 {
+		return false
+	}
+	last := st[len(st)-1]
+	if last.Kind == ir.SKInstr && last.Ins.Op == ir.OpReturn {
+		return true
+	}
+	return false
+}
+
 func matchParen(s string, open int) (int, error) {
 	depth := 0
+	inChar := false
+	inString := false
 	for i := open; i < len(s); i++ {
+		if s[i] == '\\' && (inChar || inString) {
+			i++
+			continue
+		}
+		if s[i] == '\'' && !inString {
+			inChar = !inChar
+			continue
+		}
+		if s[i] == '"' && !inChar {
+			inString = !inString
+			continue
+		}
+		if inChar || inString {
+			continue
+		}
 		switch s[i] {
 		case '(':
 			depth++
@@ -1326,14 +1654,40 @@ func splitSemi(s string) []string {
 
 func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr, error) {
 	st = strings.TrimSpace(st)
-	// (void)expr; — discard
-	if strings.HasPrefix(st, "(void)") || strings.HasPrefix(st, "((void)") {
-		return nil, nil
-	}
-	st = strings.TrimSpace(st)
 	if st == "" {
 		return nil, nil
 	}
+
+	// Comma-separated statement sequence: s1 += ptr[0], s2 += s1; (not multi-declarations: int i, r;)
+	if !isTypeToken(firstWord(st)) && strings.Contains(st, ",") {
+		parts := splitCSV(st)
+		if len(parts) > 1 {
+			var all []ir.Instr
+			for _, part := range parts {
+				ins, err := parseSimpleStmt(f, regs, strings.TrimSpace(part))
+				if err != nil {
+					return nil, err
+				}
+				all = append(all, ins...)
+			}
+			return all, nil
+		}
+	}
+
+	for strings.HasPrefix(st, "(void)") || strings.HasPrefix(st, "((void)") {
+		if strings.HasPrefix(st, "(void)") {
+			st = strings.TrimSpace(strings.TrimPrefix(st, "(void)"))
+		} else {
+			st = strings.TrimSpace(strings.TrimPrefix(st, "((void)"))
+		}
+		if strings.HasPrefix(st, "(") && strings.HasSuffix(st, ")") {
+			st = strings.TrimSpace(st[1 : len(st)-1])
+		}
+	}
+	if st == "" {
+		return nil, nil
+	}
+
 	// *p++ = … handled later; bare i++ / ++i / a[i]++
 	if !strings.Contains(st, "=") {
 		var name, op string
@@ -1351,7 +1705,7 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 				_, ins, err := pe(f, regs, name+op)
 				return ins, err
 			}
-			name = strings.TrimPrefix(name, "*")
+			name = strings.TrimPrefix(stripOuterParens(name), "*")
 			ri, ok := regs[name]
 			if !ok {
 				return nil, &Error{Code: ErrParse, Message: "inc: " + name}
@@ -1359,6 +1713,21 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 			bin := ir.OpAdd
 			if op == "--" {
 				bin = ir.OpSub
+			}
+			// double pointer cursor: advance pointed-to slice (*input)++
+			if strings.HasPrefix(string(ri.typ), "*[]") || strings.HasPrefix(st, "(*") {
+				isDbl := strings.HasPrefix(string(ri.typ), "*[]")
+				if !isDbl {
+					for _, p := range f.Params {
+						if p.Name == name && strings.HasPrefix(string(p.Type), "*[]") {
+							isDbl = true
+							break
+						}
+					}
+				}
+				if isDbl {
+					return []ir.Instr{{Op: ir.OpMov, Dst: ri.v, Sym: "double_ptr_adv1"}}, nil
+				}
 			}
 			// byte-buffer cursor: bump offSlot only (poly1305 message++, etc.)
 			if ri.ptr && ri.structName == "" && (ri.offSlotSet || ri.typ == "" || ri.typ == ir.TypUint8 || ri.typ == ir.TypInt) {
@@ -1380,6 +1749,21 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 				{Op: ir.OpMov, Dst: ri.v, Args: []ir.Value{tmp}},
 			}, nil
 		}
+	}
+
+	if st == "break" {
+		return []ir.Instr{{Op: ir.OpBreak}}, nil
+	}
+	if st == "continue" {
+		return []ir.Instr{{Op: ir.OpContinue}}, nil
+	}
+	if strings.HasPrefix(st, "goto ") {
+		lbl := strings.TrimSpace(strings.TrimPrefix(st, "goto "))
+		return []ir.Instr{{Op: ir.OpGoto, Sym: lbl}}, nil
+	}
+	if strings.HasSuffix(st, ":") && !strings.HasPrefix(st, "case ") && st != "default:" {
+		lbl := strings.TrimSpace(strings.TrimSuffix(st, ":"))
+		return []ir.Instr{{Op: ir.OpLabel, Sym: lbl}}, nil
 	}
 
 	if strings.HasPrefix(st, "return") {
@@ -1404,6 +1788,11 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 		v, ins, err := pe(f, regs, rest)
 		if err != nil {
 			return nil, err
+		}
+		if pm, ok := ptrMeta[v]; ok && pm.hasBase && pm.structName != "" && pm.base != ir.NoVal {
+			dst := f.Alloc()
+			ins = append(ins, ir.Instr{Op: ir.OpAdd, Dst: dst, Args: []ir.Value{pm.v, pm.base}, Sym: "struct_ptr_add", Elem: pm.typ})
+			v = dst
 		}
 		ins = append(ins, ir.Instr{Op: ir.OpReturn, Args: []ir.Value{v}})
 		return ins, nil
@@ -1451,9 +1840,10 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 		}
 	}
 
-	// local struct: crypto_poly1305_ctx ctx;
+	// local struct: crypto_poly1305_ctx ctx; or const utf8proc_property_t *p = ...;
 	if stc := findStruct(firstWord(st), structEnv); stc != nil {
 		rest := strings.TrimSpace(st[len(firstWord(st)):])
+		isPtr := strings.HasPrefix(rest, "*")
 		rest = strings.TrimPrefix(rest, "*")
 		rest = strings.TrimSpace(rest)
 		// name only or name = ...
@@ -1463,43 +1853,68 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 		}
 		if identOnly(nm) {
 			r := f.Alloc()
-			regs[nm] = regInfo{v: r, typ: ir.TypeName(stc.Name), ptr: false, structName: stc.Name}
-			// emit as local struct value (address taken later via &nm)
-			return []ir.Instr{{Op: ir.OpAlloca, Dst: r, Imm: 1, Elem: ir.TypeName(stc.Name), Sym: "struct:" + stc.Name}}, nil
+			stTyp := ir.TypeName(stc.Name)
+			if isPtr {
+				stTyp = ir.TypeName("*" + stc.Name)
+			}
+			regs[nm] = regInfo{v: r, typ: stTyp, ptr: isPtr, structName: stc.Name}
+			if isPtr {
+				notePtr(r, stTyp, 1, ir.NoVal)
+				pm := ptrMeta[r]
+				pm.structName = stc.Name
+				ptrMeta[r] = pm
+			}
+			alloc := ir.Instr{Op: ir.OpAlloca, Dst: r, Imm: 1, Elem: stTyp, Sym: "struct:" + stc.Name}
+			if i := strings.Index(rest, "="); i >= 0 {
+				rhs := strings.TrimSpace(rest[i+1:])
+				v, ins, err := pe(f, regs, rhs)
+				if err != nil {
+					return nil, err
+				}
+				ins = append([]ir.Instr{alloc}, ins...)
+				ins = append(ins, ir.Instr{Op: ir.OpMov, Dst: r, Args: []ir.Value{v}, Sym: "ptr_alias", Elem: stTyp})
+				return ins, nil
+			}
+			return []ir.Instr{alloc}, nil
 		}
 	}
 
-	stClean := strings.TrimSpace(st)
-	for {
-		if strings.HasPrefix(stClean, "static ") {
-			stClean = strings.TrimSpace(stClean[7:])
-		} else if strings.HasPrefix(stClean, "const ") {
-			stClean = strings.TrimSpace(stClean[6:])
-		} else if strings.HasPrefix(stClean, "volatile ") {
-			stClean = strings.TrimSpace(stClean[9:])
-		} else {
-			break
-		}
+	stClean := normalizeDeclStmt(st)
+	if identOnly(stClean) || regexp.MustCompile(`^\s*\(\s*void\s*\)\s*[A-Za-z_][A-Za-z0-9_]*\s*$`).MatchString(stClean) {
+		return nil, nil
+	}
+	if _, err := parseIntLit(stClean); err == nil {
+		return nil, nil
 	}
 
 	// multi decl: TYPE a, b, c;  or TYPE a=e0, b=e1;
-	if isTypeToken(firstWord(stClean)) && strings.Contains(stClean, ",") && !strings.Contains(stClean, "(") {
+	if isTypeToken(firstWord(stClean)) && strings.Contains(stClean, ",") {
 		fw := firstWord(stClean)
 		rest := strings.TrimSpace(stClean[len(fw):])
-		var all []ir.Instr
-		for _, part := range splitCSV(rest) {
-			part = strings.TrimSpace(part)
-			sub := fw + " " + part
-			ins, err := parseSimpleStmt(f, regs, sub)
-			if err != nil {
-				return nil, err
+		parts := splitCSV(rest)
+		if len(parts) > 1 {
+			var all []ir.Instr
+			for _, part := range parts {
+				part = strings.TrimSpace(part)
+				sub := fw + " " + part
+				ins, err := parseSimpleStmt(f, regs, sub)
+				if err != nil {
+					return nil, err
+				}
+				all = append(all, ins...)
 			}
-			all = append(all, ins...)
+			return all, nil
 		}
-		return all, nil
+	}
+	for {
+		next := regexp.MustCompile(`^\s*(?:static|const|volatile|restrict|struct|inline|__inline|__inline__)\s+`).ReplaceAllString(stClean, "")
+		if next == stClean {
+			break
+		}
+		stClean = next
 	}
 	// decl: TYPE name[N] = { ... }; or TYPE name[R][C] = { ... }; or TYPE name[N];
-	if isTypeToken(firstWord(stClean)) {
+	if isTypeToken(firstWord(stClean)) || isStructType(firstWord(stClean), structEnv) {
 		initCSV := ""
 		declHead := stClean
 		if open := strings.Index(stClean, "{"); open > 0 && strings.HasSuffix(strings.TrimSpace(stClean), "}") {
@@ -1513,7 +1928,7 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 			}
 		}
 
-		reArr2D := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(\d+)\s*\]\s*\[\s*(\d+)\s*\]$`)
+		reArr2D := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(\d*)\s*\]\s*\[\s*(\d+)\s*\]$`)
 		if m := reArr2D.FindStringSubmatch(declHead); m != nil {
 			typ := mapType(m[1])
 			sname := ""
@@ -1521,9 +1936,19 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 				typ = ir.TypeName(m[1])
 				sname = m[1]
 			}
-			r1, _ := strconv.Atoi(m[3])
 			r2, _ := strconv.Atoi(m[4])
-			total := r1 * r2
+			r1 := 0
+			total := 0
+			if m[3] != "" {
+				r1, _ = strconv.Atoi(m[3])
+				total = r1 * r2
+			} else if initCSV != "" {
+				total = len(splitCSV(initCSV))
+				r1 = total / r2
+			}
+			if total <= 0 {
+				total = r2
+			}
 			r := f.Alloc()
 			sym := sname
 			if initCSV != "" {
@@ -1558,7 +1983,7 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 			return instrs, nil
 		}
 
-		reArr := regexp.MustCompile(`(?s)^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(\d+)?\s*\]$`)
+		reArr := regexp.MustCompile(`(?s)^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*([^]]*)\s*\]$`)
 		if m := reArr.FindStringSubmatch(declHead); m != nil && (m[3] != "" || initCSV != "") {
 			typ := mapType(m[1])
 			sname := ""
@@ -1568,7 +1993,11 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 			}
 			n := 0
 			if m[3] != "" {
-				n, _ = strconv.Atoi(m[3])
+				if num, err := parseIntLit(m[3]); err == nil && num > 0 {
+					n = int(num)
+				} else {
+					n, _ = strconv.Atoi(m[3])
+				}
 			} else if initCSV != "" {
 				n = len(strings.Split(initCSV, ","))
 			}
@@ -1595,6 +2024,10 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 				sym = "struct_init:" + sname + ":" + m[2] + ":" + initCSV
 			}
 			regs[m[2]] = regInfo{v: r, typ: ir.TypeName(sname), ptr: true, scale: 1, elemIndex: false, structName: sname}
+			if f.LocalNames == nil {
+				f.LocalNames = map[ir.Value]string{}
+			}
+			f.LocalNames[r] = m[2]
 			notePtr(r, ir.TypeName(sname), 1, ir.NoVal)
 			pm := ptrMeta[r]
 			pm.structName = sname
@@ -1602,17 +2035,35 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 			return []ir.Instr{{Op: ir.OpAlloca, Dst: r, Imm: 1, Elem: ir.TypeName(sname), Sym: sym}}, nil
 		}
 
+		rePtrArr := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\[\s*(\d+)\s*\]$`)
+		if m := rePtrArr.FindStringSubmatch(declHead); m != nil {
+			typName := ir.TypeName(fmt.Sprintf("[][%s]%s", m[3], string(mapType(m[1]))))
+			r := f.Alloc()
+			regs[m[2]] = regInfo{v: r, scale: 1, typ: typName}
+			return []ir.Instr{{Op: ir.OpMov, Dst: r, Sym: "decl_uninit", Elem: typName}}, nil
+		}
+
 		if initCSV != "" {
 			return nil, &Error{Code: ErrParse, Message: "unsupported aggregate initializer: " + stClean}
 		}
 
+		stClean = regexp.MustCompile(`\b(?:const|volatile|restrict)\b`).ReplaceAllString(stClean, "")
+		stClean = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(stClean), "struct "))
+		stClean = regexp.MustCompile(`\s*\*\s*`).ReplaceAllString(stClean, " * ")
+		stClean = strings.TrimSpace(stClean)
 		// TYPE * name = expr  OR TYPE name = expr OR TYPE name
 		re := regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*(\*)?\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:=\s*(.+))?$`)
-		m := re.FindStringSubmatch(st)
+		m := re.FindStringSubmatch(stClean)
 		if m == nil {
 			return nil, &Error{Code: ErrParse, Message: "decl: " + st}
 		}
 		typ := mapType(m[1])
+		stc := findStruct(m[1], structEnv)
+		sname := ""
+		if stc != nil {
+			typ = ir.TypeName(stc.Name)
+			sname = stc.Name
+		}
 		ptr := m[2] == "*"
 		r := f.Alloc()
 		scale := 1
@@ -1624,12 +2075,21 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 				scale = 8
 			}
 		}
-		regs[m[3]] = regInfo{v: r, typ: typ, ptr: ptr, scale: scale}
+		regs[m[3]] = regInfo{v: r, typ: typ, ptr: ptr, scale: scale, structName: sname}
+		if f.LocalNames == nil {
+			f.LocalNames = map[ir.Value]string{}
+		}
+		f.LocalNames[r] = m[3]
 		if ptr {
 			notePtr(r, typ, scale, ir.NoVal)
+			if sname != "" {
+				pm := ptrMeta[r]
+				pm.structName = sname
+				ptrMeta[r] = pm
+			}
 		}
 		if m[4] == "" {
-			return nil, nil
+			return []ir.Instr{{Op: ir.OpMov, Dst: r, Sym: "decl_uninit", Elem: typ}}, nil
 		}
 		v, ins, err := pe(f, regs, m[4])
 		if err != nil {
@@ -1642,26 +2102,26 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 		if !ptr {
 			decl.Sym = "decl"
 			decl.Elem = typ
+		} else {
+			decl.Sym = "ptr_alias"
+			decl.Elem = typ
 		}
 		ins = append(ins, decl)
 		// pointer init: track meta for local variable r
 		if ptr {
-			if pm, ok := ptrMeta[v]; ok {
-				sc := scale
+			sc := scale
+			if pm, ok := ptrMeta[v]; ok && m[4] != "NULL" && m[4] != "null" && m[4] != "0" && m[4] != "nil" {
 				if pm.elemIndex {
-					sc = 1 // typed element array — index in elements, not bytes
-				}
-				regs[m[3]] = regInfo{v: r, typ: typ, ptr: true, scale: sc, base: pm.base, hasBase: pm.hasBase, elemIndex: pm.elemIndex, localArr: pm.localArr}
-				ptrMeta[r] = regs[m[3]]
-			} else if ri, ok := regs[strings.TrimSpace(m[4])]; ok && ri.ptr {
-				sc := scale
-				if ri.elemIndex {
 					sc = 1
 				}
-				regs[m[3]] = regInfo{v: r, typ: typ, ptr: true, scale: sc, base: ri.base, hasBase: ri.hasBase, elemIndex: ri.elemIndex, localArr: ri.localArr}
-				ptrMeta[r] = regs[m[3]]
+				rootV := pm.v
+				if rootV == ir.NoVal {
+					rootV = r
+				}
+				regs[m[3]] = regInfo{v: r, typ: typ, ptr: true, scale: sc, base: pm.base, hasBase: pm.hasBase, elemIndex: pm.elemIndex, localArr: pm.localArr}
+				ptrMeta[r] = regInfo{v: rootV, typ: typ, ptr: true, scale: sc, base: pm.base, hasBase: pm.hasBase, elemIndex: pm.elemIndex, localArr: pm.localArr}
 			} else {
-				regs[m[3]] = regInfo{v: r, typ: typ, ptr: true, scale: scale}
+				regs[m[3]] = regInfo{v: r, typ: typ, ptr: true, scale: sc, elemIndex: true}
 				ptrMeta[r] = regs[m[3]]
 			}
 		}
@@ -1676,8 +2136,8 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 		}
 		// fallthrough to generic if not matched
 	}
-	// bare call statement: foo(a,b);
-	if i := strings.IndexByte(st, '('); i > 0 && strings.HasSuffix(st, ")") && identOnly(strings.TrimSpace(st[:i])) {
+	// bare call statement: foo(a,b); or obj->method(a,b);
+	if i := strings.IndexByte(st, '('); i > 0 && strings.HasSuffix(st, ")") && (identOnly(strings.TrimSpace(st[:i])) || isFieldChain(strings.TrimSpace(st[:i]))) {
 		_, ins, err := pe(f, regs, st)
 		if err != nil {
 			return nil, err
@@ -1690,16 +2150,91 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 	// store: *p = e  or p[i] = e  or p->f = e  or p->f[i] = e
 	if i := strings.Index(st, "="); i > 0 {
 		// check compound first
-		for _, op := range []string{"<<=", ">>=", "+=", "-=", "*=", "&=", "|=", "^=", "="} {
+		for _, op := range []string{"<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "="} {
 			if j := strings.Index(st, op); j > 0 {
 				lhs := stripOuterParens(strings.TrimSpace(st[:j]))
 				rhs := strings.TrimSpace(st[j+len(op):])
+				if op == "=" && !strings.HasPrefix(rhs, "'") && !strings.HasPrefix(rhs, "\"") && strings.Contains(rhs, "=") && !strings.Contains(rhs, "==") && !strings.Contains(rhs, "<=") && !strings.Contains(rhs, ">=") && !strings.Contains(rhs, "!=") && !strings.Contains(rhs, "=>") {
+					eq := strings.Index(rhs, "=")
+					firstRhs := strings.TrimSpace(rhs[:eq])
+					s1, err1 := parseSimpleStmt(f, regs, rhs)
+					if err1 != nil {
+						return nil, err1
+					}
+					s2, err2 := parseSimpleStmt(f, regs, lhs+" = "+firstRhs)
+					if err2 != nil {
+						return nil, err2
+					}
+					return append(s1, s2...), nil
+				}
 				rv, ins, err := pe(f, regs, rhs)
 				if err != nil {
 					return nil, err
 				}
+				// base.field = rhs (e.g. p->arr[i].field = rhs or obj.field = rhs)
+				if dot := indexByteAtDepth(lhs, '.', 0); dot > 0 && (dot > lastIndexArrow(lhs) || !strings.Contains(lhs, "->")) {
+					base := strings.TrimSpace(lhs[:dot])
+					rest := strings.TrimSpace(lhs[dot+1:])
+					fname := rest
+					idxe := ""
+					if b := strings.IndexByte(rest, '['); b > 0 && strings.HasSuffix(rest, "]") {
+						fname = strings.TrimSpace(rest[:b])
+						idxe = rest[b+1 : len(rest)-1]
+					}
+					bv, bins, err := pe(f, regs, base)
+					if err != nil {
+						return nil, err
+					}
+					ins = append(ins, bins...)
+					sname := ""
+					if pm, ok := ptrMeta[bv]; ok {
+						sname = pm.structName
+					}
+					if sname == "" {
+						if ri, ok := regs[base]; ok {
+							sname = ri.structName
+						}
+					}
+					if sname == "" {
+						for _, p := range f.Params {
+							if p.Name == base {
+								sname = p.StructName
+								break
+							}
+						}
+					}
+					if sname == "" {
+						for _, st := range structEnv {
+							if sf := fieldOf(&st, fname); sf != nil {
+								sname = st.Name
+								break
+							}
+						}
+					}
+					elem := ir.TypUint8
+					var alen int64
+					if st := findStruct(sname, structEnv); st != nil {
+						if sf := fieldOf(st, fname); sf != nil {
+							elem = sf.Type
+							alen = int64(sf.ArrayLen)
+						}
+					}
+					if idxe != "" {
+						iv, iins, err := pe(f, regs, idxe)
+						if err != nil {
+							return nil, err
+						}
+						ins = append(ins, iins...)
+						fld := f.Alloc()
+						ins = append(ins, ir.Instr{Op: ir.OpField, Dst: fld, Args: []ir.Value{bv}, Sym: fname, Elem: elem, Imm: alen})
+						ins = append(ins, ir.Instr{Op: ir.OpStore, Args: []ir.Value{fld, iv, rv}, Elem: elem})
+						return ins, nil
+					}
+					ins = append(ins, ir.Instr{Op: ir.OpFStore, Args: []ir.Value{bv, rv}, Sym: fname, Elem: elem})
+					return ins, nil
+				}
 				// p->field or p->field[i] or (p->field)[i]
-				if arrow := indexArrow(lhs); arrow > 0 && !strings.HasPrefix(strings.TrimSpace(lhs), "(") {
+				if arrow := lastIndexArrow(lhs); arrow > 0 && !strings.HasPrefix(strings.TrimSpace(lhs), "(") {
 					base := strings.TrimSpace(lhs[:arrow])
 					rest := strings.TrimSpace(lhs[arrow+2:])
 					fname := rest
@@ -1722,6 +2257,7 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 						ins = append(ins, lins...)
 						bin := map[string]ir.Op{
 							"+=": ir.OpAdd, "-=": ir.OpSub, "*=": ir.OpMul,
+							"/=": ir.OpDiv, "%=": ir.OpMod,
 							"&=": ir.OpAnd, "|=": ir.OpOr, "^=": ir.OpXor,
 							"<<=": ir.OpShl, ">>=": ir.OpShr,
 						}[op]
@@ -1755,6 +2291,14 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 								}
 							}
 						}
+						if sname == "" {
+							for _, st := range structEnv {
+								if sf := fieldOf(&st, fname); sf != nil {
+									sname = st.Name
+									break
+								}
+							}
+						}
 						if st := findStruct(sname, structEnv); st != nil {
 							if sf := fieldOf(st, fname); sf != nil {
 								elem = sf.Type
@@ -1771,6 +2315,22 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 						if sname == "" {
 							if ri, ok := regs[base]; ok {
 								sname = ri.structName
+							}
+						}
+						if sname == "" {
+							for _, p := range f.Params {
+								if p.Name == base {
+									sname = p.StructName
+									break
+								}
+							}
+						}
+						if sname == "" {
+							for _, st := range structEnv {
+								if sf := fieldOf(&st, fname); sf != nil {
+									sname = st.Name
+									break
+								}
 							}
 						}
 						elem := ir.TypUint8
@@ -1799,6 +2359,7 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 					ins = append(ins, lins...)
 					bin := map[string]ir.Op{
 						"+=": ir.OpAdd, "-=": ir.OpSub, "*=": ir.OpMul,
+						"/=": ir.OpDiv, "%=": ir.OpMod,
 						"&=": ir.OpAnd, "|=": ir.OpOr, "^=": ir.OpXor,
 						"<<=": ir.OpShl, ">>=": ir.OpShr,
 					}[op]
@@ -1822,24 +2383,26 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 				if op == "=" {
 					ins = append(ins, ir.Instr{Op: ir.OpMov, Dst: ri.v, Args: []ir.Value{rv}})
 					if pm, ok := ptrMeta[rv]; ok {
-						slot := ri.offSlot
-						if !ri.offSlotSet {
-							slot = f.Alloc()
-							if pm.hasBase {
+						if pm.hasBase {
+							slot := ri.offSlot
+							if !ri.offSlotSet {
+								slot = f.Alloc()
 								ins = append(ins, ir.Instr{Op: ir.OpMov, Dst: slot, Args: []ir.Value{pm.base}})
-							} else {
-								z := f.Alloc()
-								ins = append(ins,
-									ir.Instr{Op: ir.OpConst, Dst: z, Imm: 0},
-									ir.Instr{Op: ir.OpMov, Dst: slot, Args: []ir.Value{z}},
-								)
 							}
+							regs[lhs] = regInfo{v: ri.v, typ: pm.typ, ptr: true, scale: pm.scale, base: slot, hasBase: true, offSlot: slot, offSlotSet: true, elemIndex: pm.elemIndex, structName: pm.structName}
+							ptrMeta[ri.v] = regs[lhs]
+						} else {
+							regs[lhs] = regInfo{v: ri.v, typ: pm.typ, ptr: true, scale: pm.scale, elemIndex: pm.elemIndex, structName: pm.structName}
+							ptrMeta[ri.v] = regs[lhs]
 						}
-						regs[lhs] = regInfo{v: ri.v, typ: pm.typ, ptr: true, scale: pm.scale, base: slot, hasBase: true, offSlot: slot, offSlotSet: true, elemIndex: pm.elemIndex}
-						ptrMeta[pm.v] = regs[lhs]
-						ptrMeta[ri.v] = regs[lhs]
 					}
 					return ins, nil
+				}
+				if strings.HasPrefix(lhs, "*") && (op == "+=" || op == "=") {
+					clean := strings.TrimSpace(strings.TrimPrefix(lhs, "*"))
+					if riClean, ok := regs[clean]; ok && strings.HasPrefix(string(riClean.typ), "*[]") {
+						return append(ins, ir.Instr{Op: ir.OpStore, Args: []ir.Value{riClean.v, rv}, Sym: "slice_ptr_advance"}), nil
+					}
 				}
 				// pointer cursor advance: ptr += N / ptr -= N via offSlot (supports reverse).
 				if ri.ptr && (op == "+=" || op == "-=") {
@@ -1873,10 +2436,12 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 					ri.base = ri.offSlot
 					regs[lhs] = ri
 					ptrMeta[ri.v] = ri
+					ptrMeta[ri.offSlot] = ri
 					return ins, nil
 				}
 				bin := map[string]ir.Op{
 					"+=": ir.OpAdd, "-=": ir.OpSub, "*=": ir.OpMul,
+					"/=": ir.OpDiv, "%=": ir.OpMod,
 					"&=": ir.OpAnd, "|=": ir.OpOr, "^=": ir.OpXor,
 					"<<=": ir.OpShl, ">>=": ir.OpShr,
 				}[op]
@@ -1889,7 +2454,7 @@ func parseSimpleStmt(f *ir.Func, regs map[string]regInfo, st string) ([]ir.Instr
 			}
 		}
 	}
-	if strings.HasSuffix(st, "++") || strings.HasSuffix(st, "--") {
+	if strings.HasSuffix(st, "++") || strings.HasSuffix(st, "--") || strings.HasPrefix(st, "++") || strings.HasPrefix(st, "--") {
 		mark := len(f.Body)
 		_, _, err := pe(f, regs, st)
 		if err == nil {
@@ -1932,11 +2497,69 @@ func ensureOffSlot(f *ir.Func, regs map[string]regInfo, name string) ir.Value {
 	ri.base = slot
 	regs[name] = ri
 	ptrMeta[ri.v] = ri
+	ptrMeta[slot] = ri
 	return slot
 }
 
 func parseStore(f *ir.Func, regs map[string]regInfo, lhs string, val ir.Value) ([]ir.Instr, error) {
 	lhs = strings.TrimSpace(lhs)
+	// arr[i].field or arr[i].field[j]
+	if dot := indexByteAtDepth(lhs, '.', 0); dot > 0 && !strings.Contains(lhs, "->") {
+		base := strings.TrimSpace(lhs[:dot])
+		rest := strings.TrimSpace(lhs[dot+1:])
+		fname := rest
+		idxe := ""
+		if b := strings.IndexByte(rest, '['); b >= 0 && strings.HasSuffix(rest, "]") {
+			fname = strings.TrimSpace(rest[:b])
+			idxe = rest[b+1 : len(rest)-1]
+		}
+		if identOnly(fname) && strings.Contains(base, "[") {
+			addr, bins, err := pe(f, regs, "&"+base)
+			if err != nil {
+				return nil, err
+			}
+			sname := ""
+			if pm, ok := ptrMeta[addr]; ok {
+				sname = pm.structName
+			}
+			if sname == "" {
+				root := base
+				if lb := strings.IndexByte(base, '['); lb > 0 {
+					root = strings.TrimSpace(base[:lb])
+				}
+				if ri, ok := regs[root]; ok {
+					sname = ri.structName
+				}
+				for _, p := range f.Params {
+					if p.Name == root && p.StructName != "" {
+						sname = p.StructName
+						break
+					}
+				}
+			}
+			elem := ir.TypUint8
+			alen := int64(0)
+			if st := findStruct(sname, structEnv); st != nil {
+				if sf := fieldOf(st, fname); sf != nil {
+					elem = sf.Type
+					alen = int64(sf.ArrayLen)
+				}
+			}
+			if idxe != "" {
+				iv, iins, err := pe(f, regs, idxe)
+				if err != nil {
+					return nil, err
+				}
+				fld := f.Alloc()
+				ins := append(bins, iins...)
+				ins = append(ins, ir.Instr{Op: ir.OpField, Dst: fld, Args: []ir.Value{addr}, Sym: fname, Elem: elem, Imm: alen})
+				ins = append(ins, ir.Instr{Op: ir.OpStore, Args: []ir.Value{fld, iv, val}, Elem: elem})
+				return ins, nil
+			}
+			ins := append(bins, ir.Instr{Op: ir.OpFStore, Args: []ir.Value{addr, val}, Sym: fname, Elem: elem})
+			return ins, nil
+		}
+	}
 	// p->field or p->field[idx]
 	if arrow := indexArrow(lhs); arrow > 0 {
 		base := strings.TrimSpace(lhs[:arrow])
@@ -1994,6 +2617,14 @@ func parseStore(f *ir.Func, regs map[string]regInfo, lhs string, val ir.Value) (
 						}
 					}
 				}
+				if sname == "" {
+					for _, st := range structEnv {
+						if sf := fieldOf(&st, field); sf != nil {
+							sname = st.Name
+							break
+						}
+					}
+				}
 				fld := f.Alloc()
 				var alen int64
 				if st := findStruct(sname, structEnv); st != nil {
@@ -2044,7 +2675,11 @@ func parseStore(f *ir.Func, regs map[string]regInfo, lhs string, val ir.Value) (
 		if pm, ok := ptrMeta[p]; ok && pm.typ != "" {
 			elem = pm.typ
 		}
-		ins = append(ins, ir.Instr{Op: ir.OpStore, Args: []ir.Value{p, val}, Elem: elem})
+		if pm, ok := ptrMeta[p]; ok && pm.hasBase && pm.base != ir.NoVal {
+			ins = append(ins, ir.Instr{Op: ir.OpStore, Args: []ir.Value{pm.v, pm.base, val}, Elem: elem})
+		} else {
+			ins = append(ins, ir.Instr{Op: ir.OpStore, Args: []ir.Value{p, val}, Elem: elem})
+		}
 		return ins, nil
 	}
 	// ((TYPE*)ptr)[idx]
@@ -2139,6 +2774,33 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 		expr = inner
 	}
 
+	// string literal "..." in expression: hoist as global constant / slice
+	if strings.HasPrefix(expr, "\"") && strings.HasSuffix(expr, "\"") && len(expr) >= 2 {
+		rawStr, err := strconv.Unquote(expr)
+		if err == nil {
+			h := sha256.Sum256([]byte(rawStr))
+			gName := fmt.Sprintf("__str_%x", h[:4])
+			g := ir.Global{Name: gName, Data: rawStr, Type: ir.TypUint8}
+			pendingGlobals = append(pendingGlobals, g)
+			dst := f.Alloc()
+			ensureScratch(f)
+			f.Body = append(f.Body, ir.Instr{Op: ir.OpMov, Dst: dst, Sym: gName, Elem: ir.TypUint8})
+			pm := regInfo{v: dst, typ: ir.TypUint8, ptr: true, elemIndex: true}
+			ptrMeta[dst] = pm
+			return dst, nil
+		}
+	}
+
+	// character literal 'c' in expression
+	if strings.HasPrefix(expr, "'") && strings.HasSuffix(expr, "'") && len(expr) >= 2 {
+		if n, err := parseIntLit(expr); err == nil {
+			dst := f.Alloc()
+			ensureScratch(f)
+			f.Body = append(f.Body, ir.Instr{Op: ir.OpConst, Dst: dst, Imm: n, Elem: ir.TypUint8})
+			return dst, nil
+		}
+	}
+
 	// ternary a ? b : c — only at paren-depth 0 (so "(a?b:c)>>3" is binop first)
 	if q := indexByteAtDepth(expr, '?', 0); q > 0 {
 		if depthZeroColon := findTernaryColon(expr, q); depthZeroColon > q {
@@ -2170,15 +2832,52 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 		rest = strings.TrimPrefix(rest, "(")
 		rest = strings.TrimSuffix(rest, ")")
 		rest = strings.TrimSpace(rest)
-		// sizeof(*ctx) or sizeof(type) — return const 1 as opaque wipe size; better: known struct sizes
-		n := int64(64) // default wipe size
 		rest = strings.TrimPrefix(rest, "*")
 		rest = strings.TrimSpace(rest)
-		if st := findStruct(rest, structEnv); st != nil {
+		n := int64(1)
+		if ri, ok := regs[rest]; ok {
+			elemSize := int64(1)
+			switch ri.typ {
+			case ir.TypUint8, ir.TypInt8:
+				elemSize = 1
+			case ir.TypUint16, ir.TypInt16:
+				elemSize = 2
+			case ir.TypUint32, ir.TypInt32, ir.TypFloat32:
+				elemSize = 4
+			case ir.TypUint64, ir.TypInt64, ir.TypFloat64:
+				elemSize = 8
+			case ir.TypUint128:
+				elemSize = 16
+			}
+			if ri.localArr > 0 {
+				n = int64(ri.localArr) * elemSize
+			} else if ri.structName != "" {
+				if st := findStruct(ri.structName, structEnv); st != nil {
+					n = int64(estimateStructSize(st))
+				}
+			} else {
+				n = elemSize
+			}
+		} else if st := findStruct(rest, structEnv); st != nil {
 			n = int64(estimateStructSize(st))
-		} else if ri, ok := regs[rest]; ok && ri.structName != "" {
-			if st := findStruct(ri.structName, structEnv); st != nil {
-				n = int64(estimateStructSize(st))
+		} else {
+			switch rest {
+			case "char", "uint8_t", "int8_t", "u8", "i8", "bool", "_Bool", "unsigned char", "signed char":
+				n = 1
+			case "short", "uint16_t", "int16_t", "u16", "i16", "unsigned short", "signed short":
+				n = 2
+			case "int", "uint32_t", "int32_t", "u32", "i32", "unsigned int", "signed int", "float", "float32":
+				n = 4
+			case "long", "long long", "uint64_t", "int64_t", "u64", "i64", "usize", "size_t", "uintptr_t", "double", "float64", "unsigned long", "unsigned long long":
+				n = 8
+			case "uint128_t", "int128_t", "u128", "i128", "__uint128_t", "unsigned __int128":
+				n = 16
+			default:
+				if strings.HasSuffix(rest, "*") {
+					n = 8
+				} else {
+					n = 64
+				}
 			}
 		}
 		dst := f.Alloc()
@@ -2187,10 +2886,20 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 		return dst, nil
 	}
 
-	// unary &  — address of local (struct) or &arr[i]
-	if strings.HasPrefix(expr, "&") {
+	// unary &  — address of local (struct) or &arr[i] or &p->field
+	if strings.HasPrefix(expr, "&") && len(expr) > 1 && expr[1] != '&' {
 		inner := strings.TrimSpace(expr[1:])
 		inner = stripOuterParens(inner)
+		if arrow := lastIndexArrow(inner); arrow > 0 || strings.Contains(inner, ".") {
+			v, err := parseExpr(f, regs, inner)
+			if err == nil {
+				dst := f.Alloc()
+				ensureScratch(f)
+				f.Body = append(f.Body, ir.Instr{Op: ir.OpMov, Dst: dst, Args: []ir.Value{v}, Sym: "addr_of"})
+				ptrMeta[dst] = regInfo{v: dst, ptr: true}
+				return dst, nil
+			}
+		}
 		// &name[idx]
 		if b := strings.IndexByte(inner, '['); b > 0 && strings.HasSuffix(inner, "]") {
 			aname := strings.TrimSpace(inner[:b])
@@ -2213,15 +2922,16 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 			}
 		}
 		if ri, ok := regs[inner]; ok {
-			// return same reg as pointer-to-struct
+			dst := f.Alloc()
+			ensureScratch(f)
+			sym := "addr_of"
+			elem := ri.typ
 			if ri.structName != "" {
-				dst := f.Alloc()
-				ensureScratch(f)
-				f.Body = append(f.Body, ir.Instr{Op: ir.OpMov, Dst: dst, Args: []ir.Value{ri.v}, Sym: "ptr_alias"})
-				ptrMeta[dst] = regInfo{v: ri.v, typ: ri.typ, ptr: true, structName: ri.structName}
-				return dst, nil
+				elem = ir.TypeName(ri.structName)
 			}
-			return ri.v, nil
+			f.Body = append(f.Body, ir.Instr{Op: ir.OpMov, Dst: dst, Args: []ir.Value{ri.v}, Sym: sym, Elem: elem})
+			ptrMeta[dst] = regInfo{v: dst, typ: ri.typ, ptr: true, structName: ri.structName}
+			return dst, nil
 		}
 		return ir.NoVal, &Error{Code: ErrParse, Message: "addr: " + inner}
 	}
@@ -2252,17 +2962,19 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 			if op == "+" || op == "-" {
 				leftPtr := false
 				var pm regInfo
-				if p, ok := ptrMeta[left]; ok && p.ptr && p.structName == "" {
+				if p, ok := ptrMeta[left]; ok && p.ptr && !intScalarReg(p) {
 					pm, leftPtr = p, true
-				} else {
-					for _, r := range regs {
-						if r.v == left && r.ptr && r.structName == "" {
-							pm, leftPtr = r, true
-							break
-						}
-					}
 				}
 				if leftPtr {
+					rightPtr := false
+					if p, ok := ptrMeta[right]; ok && p.ptr && !intScalarReg(p) {
+						rightPtr = true
+					}
+					if op == "-" && rightPtr {
+						diff := f.Alloc()
+						f.Body = append(f.Body, ir.Instr{Op: ir.OpSub, Dst: diff, Args: []ir.Value{left, right}, Elem: ir.TypUint64})
+						return diff, nil
+					}
 					root := left
 					if pm.hasBase {
 						root = pm.v
@@ -2287,19 +2999,12 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 						}
 					}
 					f.Body = append(f.Body, ir.Instr{Op: ir.OpMov, Dst: dst, Args: []ir.Value{root}, Sym: "ptr_alias"})
-					ptrMeta[dst] = regInfo{v: root, typ: pm.typ, ptr: true, scale: pm.scale, base: off, hasBase: true, elemIndex: pm.elemIndex}
+					ptrMeta[dst] = regInfo{v: root, typ: pm.typ, ptr: true, scale: pm.scale, base: off, hasBase: true, elemIndex: pm.elemIndex, structName: pm.structName}
 					return dst, nil
 				} else if op == "+" {
 					rightPtr := false
-					if p, ok := ptrMeta[right]; ok && p.ptr && p.structName == "" {
+					if p, ok := ptrMeta[right]; ok && p.ptr && !intScalarReg(p) {
 						pm, rightPtr = p, true
-					} else {
-						for _, r := range regs {
-							if r.v == right && r.ptr && r.structName == "" {
-								pm, rightPtr = r, true
-								break
-							}
-						}
 					}
 					if rightPtr {
 						root := right
@@ -2314,7 +3019,7 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 							off = left
 						}
 						f.Body = append(f.Body, ir.Instr{Op: ir.OpMov, Dst: dst, Args: []ir.Value{root}, Sym: "ptr_alias"})
-						ptrMeta[dst] = regInfo{v: root, typ: pm.typ, ptr: true, scale: pm.scale, base: off, hasBase: true, elemIndex: pm.elemIndex}
+						ptrMeta[dst] = regInfo{v: root, typ: pm.typ, ptr: true, scale: pm.scale, base: off, hasBase: true, elemIndex: pm.elemIndex, structName: pm.structName}
 						return dst, nil
 					}
 				}
@@ -2368,17 +3073,73 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 	// unary *
 	if strings.HasPrefix(expr, "*") && !strings.HasPrefix(expr, "*=") {
 		name := strings.TrimSpace(expr[1:])
+		if strings.HasSuffix(name, "++") {
+			pname := strings.TrimSpace(strings.TrimSuffix(name, "++"))
+			if ri, ok := regs[pname]; ok && ri.ptr && ri.structName == "" {
+				slot := ensureOffSlot(f, regs, pname)
+				ri = regs[pname]
+				oldv := f.Alloc()
+				one := f.Alloc()
+				tmp := f.Alloc()
+				dst := f.Alloc()
+				ensureScratch(f)
+				elem := ri.typ
+				if elem == "" {
+					elem = ir.TypUint8
+				}
+				f.Body = append(f.Body,
+					ir.Instr{Op: ir.OpMov, Dst: oldv, Args: []ir.Value{slot}, Elem: ir.TypUint64},
+					ir.Instr{Op: ir.OpConst, Dst: one, Imm: 1, Elem: ir.TypUint64},
+					ir.Instr{Op: ir.OpAdd, Dst: tmp, Args: []ir.Value{slot, one}, Elem: ir.TypUint64},
+					ir.Instr{Op: ir.OpMov, Dst: slot, Args: []ir.Value{tmp}, Elem: ir.TypUint64},
+					ir.Instr{Op: ir.OpLoad, Dst: dst, Args: []ir.Value{ri.v, oldv}, Elem: elem},
+				)
+				return dst, nil
+			}
+		}
+		if strings.HasPrefix(name, "++") {
+			pname := strings.TrimSpace(strings.TrimPrefix(name, "++"))
+			if ri, ok := regs[pname]; ok && ri.ptr && ri.structName == "" {
+				slot := ensureOffSlot(f, regs, pname)
+				ri = regs[pname]
+				one := f.Alloc()
+				tmp := f.Alloc()
+				dst := f.Alloc()
+				ensureScratch(f)
+				elem := ri.typ
+				if elem == "" {
+					elem = ir.TypUint8
+				}
+				f.Body = append(f.Body,
+					ir.Instr{Op: ir.OpConst, Dst: one, Imm: 1, Elem: ir.TypUint64},
+					ir.Instr{Op: ir.OpAdd, Dst: tmp, Args: []ir.Value{slot, one}, Elem: ir.TypUint64},
+					ir.Instr{Op: ir.OpMov, Dst: slot, Args: []ir.Value{tmp}, Elem: ir.TypUint64},
+					ir.Instr{Op: ir.OpLoad, Dst: dst, Args: []ir.Value{ri.v, slot}, Elem: elem},
+				)
+				return dst, nil
+			}
+		}
 		// byte-buffer cursor: *p → p[offSlot], not p[0] (poly1305 message++, etc.)
 		// Note: params set elemIndex=true for all ptrs; gate on elem type only.
 		if identOnly(name) {
-			if ri, ok := regs[name]; ok && ri.ptr && ri.structName == "" &&
-				(ri.typ == "" || ri.typ == ir.TypUint8 || ri.typ == ir.TypInt) {
+			if ri, ok := regs[name]; ok && ri.ptr && ri.structName == "" {
+				if strings.HasPrefix(string(ri.typ), "*[]") {
+					dst := f.Alloc()
+					ensureScratch(f)
+					elemType := ir.TypeName(strings.TrimPrefix(string(ri.typ), "*[]"))
+					if elemType == "byte" {
+						elemType = ir.TypUint8
+					}
+					f.Body = append(f.Body, ir.Instr{Op: ir.OpLoad, Dst: dst, Args: []ir.Value{ri.v}, Elem: elemType, Sym: "deref_slice_ptr"})
+					ptrMeta[dst] = regInfo{v: dst, typ: elemType, ptr: true, elemIndex: true}
+					return dst, nil
+				}
 				slot := ensureOffSlot(f, regs, name)
 				ri = regs[name]
 				dst := f.Alloc()
 				ensureScratch(f)
 				elem := ri.typ
-				if elem == "" || elem == ir.TypInt {
+				if elem == "" {
 					elem = ir.TypUint8
 				}
 				f.Body = append(f.Body, ir.Instr{Op: ir.OpLoad, Dst: dst, Args: []ir.Value{ri.v, slot}, Elem: elem})
@@ -2397,7 +3158,11 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 		} else if ri, ok := regs[name]; ok && ri.typ != "" {
 			elem = ri.typ
 		}
-		f.Body = append(f.Body, ir.Instr{Op: ir.OpLoad, Dst: dst, Args: []ir.Value{inner}, Elem: elem})
+		if pm, ok := ptrMeta[inner]; ok && pm.hasBase && pm.base != ir.NoVal {
+			f.Body = append(f.Body, ir.Instr{Op: ir.OpLoad, Dst: dst, Args: []ir.Value{pm.v, pm.base}, Elem: elem})
+		} else {
+			f.Body = append(f.Body, ir.Instr{Op: ir.OpLoad, Dst: dst, Args: []ir.Value{inner}, Elem: elem})
+		}
 		return dst, nil
 	}
 
@@ -2409,6 +3174,7 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 			// pointer cast
 			if strings.HasSuffix(maybe, "*") {
 				et := strings.TrimSpace(strings.TrimSuffix(maybe, "*"))
+				et = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(et), "const")), "struct"))
 				if isTypeToken(et) {
 					inner, err := parseExpr(f, regs, rest)
 					if err != nil {
@@ -2416,8 +3182,11 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 					}
 					dst := f.Alloc()
 					ensureScratch(f)
-					f.Body = append(f.Body, ir.Instr{Op: ir.OpMov, Dst: dst, Args: []ir.Value{inner}, Sym: "ptr_cast"})
 					mt := mapType(et)
+					if isStructType(et, structEnv) {
+						mt = ir.TypeName("*" + et)
+					}
+					f.Body = append(f.Body, ir.Instr{Op: ir.OpMov, Dst: dst, Args: []ir.Value{inner}, Sym: "ptr_cast", Elem: mt})
 					scale := 1
 					switch mt {
 					case ir.TypUint32:
@@ -2507,11 +3276,7 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 					cleanBase = sub
 				}
 			}
-			if isSimpleBase(cleanBase) || isPtrOffsetBase(cleanBase) {
-				bv, err := parseExpr(f, regs, cleanBase)
-				if err != nil {
-					return ir.NoVal, err
-				}
+			if bv, err := parseExpr(f, regs, cleanBase); err == nil {
 				iv, err := parseExpr(f, regs, idxe)
 				if err != nil {
 					return ir.NoVal, err
@@ -2522,17 +3287,42 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 				var root, idx ir.Value
 				var elem ir.TypeName
 				var extra []ir.Instr
+				sname := ""
+				if pm, ok := ptrMeta[bv]; ok && pm.structName != "" {
+					sname = pm.structName
+				}
+				if ri, ok := regs[base]; ok && ri.cols > 0 && ri.typ == ir.TypUint8 && ri.localArr > 0 {
+					sc := f.Alloc()
+					mul := f.Alloc()
+					f.Body = append(f.Body,
+						ir.Instr{Op: ir.OpConst, Dst: sc, Imm: int64(ri.cols)},
+						ir.Instr{Op: ir.OpMul, Dst: mul, Args: []ir.Value{iv, sc}},
+						ir.Instr{Op: ir.OpAdd, Dst: dst, Args: []ir.Value{ri.v, mul}, Sym: "ptr_add"},
+					)
+					ptrMeta[dst] = regInfo{v: dst, typ: ri.typ, ptr: true, scale: 1, elemIndex: true}
+					notePtr(dst, ri.typ, 1, ir.NoVal)
+					return dst, nil
+				}
 				if ri, ok := regs[base]; ok && ri.ptr {
-					ptrMeta[ri.v] = ri
 					root, idx, elem, extra = scalePtrIndex(f, ri.v, iv)
+					if ri.structName != "" {
+						sname = ri.structName
+					}
 				} else {
 					root, idx, elem, extra = scalePtrIndex(f, bv, iv)
 				}
 				if elem == "" {
-					elem = ir.TypUint8
+					if sname != "" {
+						elem = ir.TypeName(sname)
+					} else {
+						elem = ir.TypUint8
+					}
 				}
 				f.Body = append(f.Body, extra...)
 				delete(ptrMeta, dst)
+				if sname != "" {
+					ptrMeta[dst] = regInfo{v: dst, typ: elem, structName: sname}
+				}
 				f.Body = append(f.Body, ir.Instr{Op: ir.OpLoad, Dst: dst, Args: []ir.Value{root, idx}, Elem: elem})
 				return dst, nil
 			}
@@ -2542,7 +3332,8 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 	// postfix ++/--
 	if (strings.HasSuffix(expr, "++") || strings.HasSuffix(expr, "--")) && !strings.Contains(expr, "=") {
 		op := expr[len(expr)-2:]
-		name := strings.TrimSpace(expr[:len(expr)-2])
+		rawName := strings.TrimSpace(expr[:len(expr)-2])
+		name := strings.TrimPrefix(stripOuterParens(rawName), "*")
 		if identOnly(name) {
 			ri, ok := regs[name]
 			if !ok {
@@ -2588,8 +3379,8 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 			return old, nil
 		}
 		// a[i]++ / ctx->f++ / ctx->f[i]++
-		if strings.Contains(name, "[") || strings.Contains(name, "->") {
-			old, err := parseExpr(f, regs, name) // load
+		if strings.Contains(rawName, "[") || strings.Contains(rawName, "->") {
+			old, err := parseExpr(f, regs, rawName) // load
 			if err != nil {
 				return ir.NoVal, err
 			}
@@ -2608,7 +3399,7 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 			// parseStore must not wipe Body via pe — save/restore
 			saved := f.Body
 			f.Body = nil
-			stins, err := parseStore(f, regs, name, tmp)
+			stins, err := parseStore(f, regs, rawName, tmp)
 			f.Body = saved
 			if err != nil {
 				return ir.NoVal, err
@@ -2620,7 +3411,8 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 	// prefix ++/--
 	if (strings.HasPrefix(expr, "++") || strings.HasPrefix(expr, "--")) && !strings.Contains(expr, "=") {
 		op := expr[:2]
-		name := strings.TrimSpace(expr[2:])
+		rawName := strings.TrimSpace(expr[2:])
+		name := strings.TrimPrefix(stripOuterParens(rawName), "*")
 		if identOnly(name) {
 			ri, ok := regs[name]
 			if !ok {
@@ -2661,41 +3453,101 @@ func parseExpr(f *ir.Func, regs map[string]regInfo, expr string) (ir.Value, erro
 		}
 	}
 
-	if i := strings.IndexByte(expr, '('); i > 0 && strings.HasSuffix(expr, ")") && identOnly(strings.TrimSpace(expr[:i])) {
-		close, err := matchParen(expr, i)
-		if err != nil || close != len(expr)-1 {
-			// not a pure call (e.g. f(x) | g(y)) — fall through to binops
-			goto afterCall
-		}
-		fname := strings.TrimSpace(expr[:i])
-		argsRaw := expr[i+1 : close]
-		var argVals []ir.Value
-		if strings.TrimSpace(argsRaw) != "" {
-			for _, a := range splitCSV(argsRaw) {
-				v, err := parseExpr(f, regs, a)
-				if err != nil {
-					return ir.NoVal, err
+	// parenthesized call: (*fnptr)(args) or (fnptr)(args)
+	if strings.HasPrefix(expr, "(") {
+		if close1, err := matchParen(expr, 0); err == nil && close1 < len(expr)-1 {
+			head := strings.TrimSpace(expr[:close1+1])
+			rest := strings.TrimSpace(expr[close1+1:])
+			if strings.HasPrefix(rest, "(") && strings.HasSuffix(rest, ")") {
+				if close2, err2 := matchParen(rest, 0); err2 == nil && close2 == len(rest)-1 {
+					headClean := strings.TrimPrefix(stripOuterParens(head), "*")
+					headClean = strings.TrimSpace(headClean)
+					if identOnly(headClean) {
+						fname := headClean
+						argsRaw := rest[1 : len(rest)-1]
+						var argVals []ir.Value
+						if strings.TrimSpace(argsRaw) != "" {
+							for _, a := range splitCSV(argsRaw) {
+								v, err := parseExpr(f, regs, a)
+								if err != nil {
+									return ir.NoVal, err
+								}
+								argVals = append(argVals, v)
+							}
+						}
+						dst := f.Alloc()
+						ensureScratch(f)
+						f.Body = append(f.Body, ir.Instr{Op: ir.OpCall, Dst: dst, Args: argVals, Sym: fname})
+						return dst, nil
+					}
 				}
-				// materialize ptr+off as reslice for call args (load32_le(src+i*4))
-				if pm, ok := ptrMeta[v]; ok && pm.hasBase && pm.structName == "" {
-					nv := f.Alloc()
-					ensureScratch(f)
-					f.Body = append(f.Body, ir.Instr{Op: ir.OpAdd, Dst: nv, Args: []ir.Value{pm.v, pm.base}, Sym: "ptr_add"})
-					ptrMeta[nv] = regInfo{v: nv, typ: pm.typ, ptr: true, scale: pm.scale, elemIndex: pm.elemIndex}
-					v = nv
-				}
-				argVals = append(argVals, v)
 			}
 		}
-		dst := f.Alloc()
-		ensureScratch(f)
-		f.Body = append(f.Body, ir.Instr{Op: ir.OpCall, Dst: dst, Args: argVals, Sym: fname})
-		return dst, nil
+	}
+
+	if i := strings.IndexByte(expr, '('); i > 0 && strings.HasSuffix(expr, ")") {
+		head := strings.TrimSpace(expr[:i])
+		headClean := strings.TrimPrefix(stripOuterParens(head), "*")
+		headClean = strings.TrimSpace(headClean)
+		isPureCall := identOnly(head) || identOnly(headClean)
+		if isPureCall && !identOnly(head) {
+			head = headClean
+		}
+		isMethodCall := false
+		var mBase, mField string
+		if !isPureCall {
+			if isFieldChain(head) {
+				isMethodCall = true
+				mBase = head
+			} else if arrow := indexArrow(head); arrow > 0 && identOnly(strings.TrimSpace(head[:arrow])) && identOnly(strings.TrimSpace(head[arrow+2:])) {
+				isMethodCall = true
+				mBase = strings.TrimSpace(head[:arrow])
+				mField = strings.TrimSpace(head[arrow+2:])
+			} else if dot := indexByteAtDepth(head, '.', 0); dot > 0 && identOnly(strings.TrimSpace(head[:dot])) && identOnly(strings.TrimSpace(head[dot+1:])) {
+				isMethodCall = true
+				mBase = strings.TrimSpace(head[:dot])
+				mField = strings.TrimSpace(head[dot+1:])
+			}
+		}
+		if isPureCall || isMethodCall {
+			close, err := matchParen(expr, i)
+			if err != nil || close != len(expr)-1 {
+				// not a pure call (e.g. f(x) | g(y)) — fall through to binops
+				goto afterCall
+			}
+			fname := head
+			if isMethodCall && mField != "" {
+				fname = mBase + "->" + mField
+			}
+			argsRaw := expr[i+1 : close]
+			var argVals []ir.Value
+			if strings.TrimSpace(argsRaw) != "" {
+				for _, a := range splitCSV(argsRaw) {
+					v, err := parseExpr(f, regs, a)
+					if err != nil {
+						return ir.NoVal, err
+					}
+					// materialize ptr+off as reslice for call args (load32_le(src+i*4))
+					if pm, ok := ptrMeta[v]; ok && pm.ptr && pm.hasBase && pm.structName == "" && pm.base != pm.v && pm.base != ir.NoVal {
+						nv := f.Alloc()
+						ensureScratch(f)
+						f.Body = append(f.Body, ir.Instr{Op: ir.OpAdd, Dst: nv, Args: []ir.Value{pm.v, pm.base}, Sym: "ptr_add"})
+						ptrMeta[nv] = regInfo{v: nv, typ: pm.typ, ptr: true, scale: pm.scale, elemIndex: pm.elemIndex}
+						v = nv
+					}
+					argVals = append(argVals, v)
+				}
+			}
+			dst := f.Alloc()
+			ensureScratch(f)
+			f.Body = append(f.Body, ir.Instr{Op: ir.OpCall, Dst: dst, Args: argVals, Sym: fname})
+			return dst, nil
+		}
 	}
 
 afterCall:
 	// a.field or a.field[i] or arr[i].field (struct value, monocypher blocks[i].a / tmp_c.Yp)
-	if dot := indexByteAtDepth(expr, '.', 0); dot > 0 && !strings.Contains(expr, "->") {
+	if dot := indexByteAtDepth(expr, '.', 0); dot > 0 && (dot > lastIndexArrow(expr) || !strings.Contains(expr, "->")) {
 		base := strings.TrimSpace(expr[:dot])
 		rest := strings.TrimSpace(expr[dot+1:])
 		fname := rest
@@ -2704,18 +3556,16 @@ afterCall:
 			fname = strings.TrimSpace(rest[:b])
 			idxe = rest[b+1 : len(rest)-1]
 		}
-		if identOnly(fname) && (identOnly(base) || strings.Contains(base, "[")) {
+		if identOnly(fname) {
 			var baseVal ir.Value
 			var sname string
 			if identOnly(base) {
-				ri, ok := regs[base]
-				if !ok || ri.structName == "" {
-					return ir.NoVal, &Error{Code: ErrParse, Message: "dot field base: " + base}
+				if ri, ok := regs[base]; ok && ri.structName != "" {
+					baseVal = ri.v
+					sname = ri.structName
 				}
-				baseVal = ri.v
-				sname = ri.structName
-			} else {
-				// arr[i].field — resolve base expression first (may be load of struct)
+			}
+			if baseVal == ir.NoVal || sname == "" {
 				bv, err := parseExpr(f, regs, base)
 				if err != nil {
 					return ir.NoVal, err
@@ -2733,8 +3583,6 @@ afterCall:
 					}
 				}
 				if sname == "" {
-					// Infer from array/pointer element struct: blocks is blk*
-					// Look at root of index expr.
 					root := base
 					if lb := strings.IndexByte(base, '['); lb > 0 {
 						root = strings.TrimSpace(base[:lb])
@@ -2745,6 +3593,14 @@ afterCall:
 					for _, p := range f.Params {
 						if p.Name == root && p.StructName != "" {
 							sname = p.StructName
+							break
+						}
+					}
+				}
+				if sname == "" {
+					for i := range structEnv {
+						if fieldOf(&structEnv[i], fname) != nil {
+							sname = structEnv[i].Name
 							break
 						}
 					}
@@ -2761,8 +3617,10 @@ afterCall:
 			dst := f.Alloc()
 			ensureScratch(f)
 			f.Body = append(f.Body, ir.Instr{Op: ir.OpField, Dst: dst, Args: []ir.Value{baseVal}, Sym: fname, Elem: sf.Type, Imm: int64(sf.ArrayLen)})
-			if sf.ArrayLen > 0 {
-				// array field decays to pointer
+			if isStructType(string(sf.Type), structEnv) {
+				ptrMeta[dst] = regInfo{v: dst, typ: sf.Type, ptr: sf.ArrayLen < 0 || sf.ArrayLen > 0, structName: string(sf.Type), localArr: sf.ArrayLen, elemIndex: sf.ArrayLen > 0}
+			} else if sf.ArrayLen != 0 {
+				// array or pointer field decays to pointer/slice
 				ptrMeta[dst] = regInfo{v: dst, typ: sf.Type, ptr: true, scale: 1, elemIndex: true, localArr: sf.ArrayLen}
 				notePtr(dst, sf.Type, 1, ir.NoVal)
 			}
@@ -2773,6 +3631,9 @@ afterCall:
 				}
 				ld := f.Alloc()
 				f.Body = append(f.Body, ir.Instr{Op: ir.OpLoad, Dst: ld, Args: []ir.Value{dst, iv}, Elem: sf.Type})
+				if isStructType(string(sf.Type), structEnv) {
+					ptrMeta[ld] = regInfo{v: ld, typ: sf.Type, structName: string(sf.Type)}
+				}
 				return ld, nil
 			}
 			return dst, nil
@@ -2780,7 +3641,7 @@ afterCall:
 	}
 
 	// p->field or p->field[i]  (after binops so ctx->x + 1 splits correctly)
-	if arrow := indexArrow(expr); arrow > 0 {
+	if arrow := lastIndexArrow(expr); arrow > 0 {
 		base := strings.TrimSpace(expr[:arrow])
 		rest := strings.TrimSpace(expr[arrow+2:])
 		fname := rest
@@ -2798,18 +3659,29 @@ afterCall:
 			sname := ""
 			if pm, ok := ptrMeta[bv]; ok {
 				sname = pm.structName
+				if sname == "" && pm.typ != "" && isStructType(string(pm.typ), structEnv) {
+					sname = string(pm.typ)
+				}
 			}
 			if sname == "" {
 				if ri, ok := regs[base]; ok {
 					sname = ri.structName
+					if sname == "" && ri.typ != "" && isStructType(string(ri.typ), structEnv) {
+						sname = string(ri.typ)
+					}
 				}
 			}
 			// also try regs by value match
 			if sname == "" {
 				for _, ri := range regs {
-					if ri.v == bv && ri.structName != "" {
+					if ri.v == bv {
 						sname = ri.structName
-						break
+						if sname == "" && ri.typ != "" && isStructType(string(ri.typ), structEnv) {
+							sname = string(ri.typ)
+						}
+						if sname != "" {
+							break
+						}
 					}
 				}
 			}
@@ -2817,6 +3689,14 @@ afterCall:
 				for _, p := range f.Params {
 					if p.Name == base {
 						sname = p.StructName
+						break
+					}
+				}
+			}
+			if sname == "" {
+				for i := range structEnv {
+					if fieldOf(&structEnv[i], fname) != nil {
+						sname = structEnv[i].Name
 						break
 					}
 				}
@@ -2837,15 +3717,27 @@ afterCall:
 				}
 				ld := f.Alloc()
 				f.Body = append(f.Body, ir.Instr{Op: ir.OpLoad, Dst: ld, Args: []ir.Value{dst, iv}, Elem: sf.Type})
+				if isStructType(string(sf.Type), structEnv) {
+					ptrMeta[ld] = regInfo{v: ld, typ: sf.Type, structName: string(sf.Type)}
+				}
 				return ld, nil
 			}
-			if sf.ArrayLen > 0 {
-				ptrMeta[dst] = regInfo{v: dst, typ: sf.Type, ptr: true, scale: 1, elemIndex: true}
+			if isStructType(string(sf.Type), structEnv) {
+				ptrMeta[dst] = regInfo{v: dst, typ: sf.Type, ptr: sf.ArrayLen < 0, structName: string(sf.Type)}
+			} else if sf.ArrayLen != 0 {
+				ptrMeta[dst] = regInfo{v: dst, typ: sf.Type, ptr: true, scale: 1, elemIndex: true, localArr: sf.ArrayLen}
+				notePtr(dst, sf.Type, 1, ir.NoVal)
 			}
 			return dst, nil
 		}
 	}
 
+	if expr == "NULL" || expr == "null" || expr == "nil" {
+		dst := f.Alloc()
+		ensureScratch(f)
+		f.Body = append(f.Body, ir.Instr{Op: ir.OpConst, Dst: dst, Imm: 0})
+		return dst, nil
+	}
 	if ri, ok := regs[expr]; ok {
 		// Keep root register; call-site / index path apply offSlot (avoid unused temps).
 		return ri.v, nil
@@ -2898,6 +3790,12 @@ afterCall:
 		f.Body = append(f.Body, ir.Instr{Op: ir.OpConst, Dst: dst, Imm: n})
 		return dst, nil
 	}
+	if identOnly(expr) {
+		dst := f.Alloc()
+		ensureScratch(f)
+		f.Body = append(f.Body, ir.Instr{Op: ir.OpMov, Dst: dst, Sym: "fn:" + expr})
+		return dst, nil
+	}
 	return ir.NoVal, &Error{Code: ErrParse, Message: "expr: " + expr}
 }
 
@@ -2914,15 +3812,81 @@ func drainExpr(f *ir.Func) []ir.Instr {
 // wrap parseBlock to drain expr scratch into instructions before each stmt
 // Actually parseExpr appends to f.Body — parseSimpleStmt and friends must prepend drain.
 
+func indexCaseColon(s string) int {
+	inChar := false
+	inString := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && (inChar || inString) {
+			i++
+			continue
+		}
+		if s[i] == '\'' && !inString {
+			inChar = !inChar
+			continue
+		}
+		if s[i] == '"' && !inChar {
+			inString = !inString
+			continue
+		}
+		if s[i] == ':' && !inChar && !inString {
+			return i
+		}
+	}
+	return -1
+}
+
 func parseIntLit(s string) (int64, error) {
 	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "'") && strings.HasSuffix(s, "'") && len(s) >= 2 {
+		inner := s[1 : len(s)-1]
+		if inner == `\"` || inner == `"` {
+			return int64('"'), nil
+		}
+		if inner == `\'` || inner == `'` {
+			return int64('\''), nil
+		}
+		if inner == `\\` {
+			return int64('\\'), nil
+		}
+		if inner == `\n` {
+			return int64('\n'), nil
+		}
+		if inner == `\r` {
+			return int64('\r'), nil
+		}
+		if inner == `\t` {
+			return int64('\t'), nil
+		}
+		if inner == `\b` {
+			return int64('\b'), nil
+		}
+		if inner == `\f` {
+			return int64('\f'), nil
+		}
+		if inner == `\0` {
+			return 0, nil
+		}
+		if len(inner) == 1 {
+			return int64(inner[0]), nil
+		}
+		r, _, _, err := strconv.UnquoteChar(inner, '\'')
+		if err == nil {
+			return int64(r), nil
+		}
+	}
 	s = strings.TrimRight(s, "uUlL")
 	s = strings.TrimRight(s, "uUlL")
 	// uint64 bit-pattern (FNV offset etc. exceed int64 max)
 	if u, err := strconv.ParseUint(s, 0, 64); err == nil {
 		return int64(u), nil
 	}
-	return strconv.ParseInt(s, 0, 64)
+	if n, err := strconv.ParseInt(s, 0, 64); err == nil {
+		return n, nil
+	}
+	if val, ok := evalIntExpr(s); ok {
+		return val, nil
+	}
+	return 0, fmt.Errorf("invalid int lit: %s", s)
 }
 
 func binOp(op string) ir.Op {
@@ -2956,6 +3920,58 @@ func findOp(expr string, ops []string) (int, string) {
 	depth := 0
 	for i := len(expr) - 1; i >= 0; i-- {
 		c := expr[i]
+		if c == '\'' {
+			sl := 0
+			for k := i - 1; k >= 0 && expr[k] == '\\'; k-- {
+				sl++
+			}
+			if sl%2 == 1 {
+				continue
+			}
+			j := i - 1
+			for j >= 0 {
+				if expr[j] == '\'' {
+					jsl := 0
+					for k := j - 1; k >= 0 && expr[k] == '\\'; k-- {
+						jsl++
+					}
+					if jsl%2 == 0 {
+						break
+					}
+				}
+				j--
+			}
+			if j >= 0 {
+				i = j
+				continue
+			}
+		}
+		if c == '"' {
+			sl := 0
+			for k := i - 1; k >= 0 && expr[k] == '\\'; k-- {
+				sl++
+			}
+			if sl%2 == 1 {
+				continue
+			}
+			j := i - 1
+			for j >= 0 {
+				if expr[j] == '"' {
+					jsl := 0
+					for k := j - 1; k >= 0 && expr[k] == '\\'; k-- {
+						jsl++
+					}
+					if jsl%2 == 0 {
+						break
+					}
+				}
+				j--
+			}
+			if j >= 0 {
+				i = j
+				continue
+			}
+		}
 		if c == ')' || c == ']' {
 			depth++
 			continue
@@ -2974,12 +3990,21 @@ func findOp(expr string, ops []string) (int, string) {
 				if start == 0 {
 					continue
 				}
-				// (TYPE)-x / (TYPE)+x : unary after cast, not binary.
-				// Do not skip (a)+b where a is a value.
+				// Unary +/- preceded by an operator or open bracket/paren (e.g. + -x or * -x or (-x))
 				if (op == "-" || op == "+") && start > 0 {
+					if expr[start-1] == 'e' || expr[start-1] == 'E' {
+						if start > 1 && ((expr[start-2] >= '0' && expr[start-2] <= '9') || expr[start-2] == '.') {
+							continue
+						}
+					}
 					j := start - 1
 					for j >= 0 && (expr[j] == ' ' || expr[j] == '\t') {
 						j--
+					}
+					if j >= 0 && (expr[j] == '+' || expr[j] == '-' || expr[j] == '*' || expr[j] == '/' || expr[j] == '%' ||
+						expr[j] == '&' || expr[j] == '|' || expr[j] == '^' || expr[j] == '<' || expr[j] == '>' ||
+						expr[j] == '=' || expr[j] == ',' || expr[j] == '?' || expr[j] == ':' || expr[j] == '(' || expr[j] == '[') {
+						continue
 					}
 					if j >= 0 && expr[j] == ')' {
 						depthP := 0
@@ -3091,23 +4116,48 @@ func splitCSV(s string) []string {
 	var out []string
 	var cur strings.Builder
 	depth := 0
-	for _, r := range s {
+	inChar := false
+	inString := false
+	for i := 0; i < len(s); i++ {
+		r := s[i]
+		if r == '\\' && (inChar || inString) {
+			cur.WriteByte(r)
+			if i+1 < len(s) {
+				i++
+				cur.WriteByte(s[i])
+			}
+			continue
+		}
+		if r == '\'' && !inString {
+			inChar = !inChar
+			cur.WriteByte(r)
+			continue
+		}
+		if r == '"' && !inChar {
+			inString = !inString
+			cur.WriteByte(r)
+			continue
+		}
+		if inChar || inString {
+			cur.WriteByte(r)
+			continue
+		}
 		switch r {
-		case '(', '[':
+		case '(', '[', '{':
 			depth++
-			cur.WriteRune(r)
-		case ')', ']':
+			cur.WriteByte(r)
+		case ')', ']', '}':
 			depth--
-			cur.WriteRune(r)
+			cur.WriteByte(r)
 		case ',':
 			if depth == 0 {
 				out = append(out, cur.String())
 				cur.Reset()
 			} else {
-				cur.WriteRune(r)
+				cur.WriteByte(r)
 			}
 		default:
-			cur.WriteRune(r)
+			cur.WriteByte(r)
 		}
 	}
 	if t := strings.TrimSpace(cur.String()); t != "" {
@@ -3205,6 +4255,24 @@ func isPtrCastBase(s string) bool {
 
 func identOnly(s string) bool {
 	return regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(strings.TrimSpace(s))
+}
+
+func isFieldChain(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	s = strings.ReplaceAll(s, "->", ".")
+	parts := strings.Split(s, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	for _, p := range parts {
+		if !identOnly(strings.TrimSpace(p)) {
+			return false
+		}
+	}
+	return true
 }
 
 // tryArrayInitDecl consumes brace-initialized arrays. Returns bytes consumed + stmts.
@@ -3323,12 +4391,12 @@ func tryArrayInitDecl(f *ir.Func, regs map[string]regInfo, rest string) (int, []
 	// uint8_t key_block[128] = {0} hoisté → clé courte polluée par la clé
 	// longue antérieure) — en plus de la non-réentrance.
 	hoist := len(dims) >= 2 ||
-		(total >= 32 && looksLikeConstInit(initBody) && !isZeroInit(initBody)) ||
-		(wasStaticConst && !isZeroInit(initBody) && looksLikeConstInit(initBody))
+		(looksLikeConstInit(initBody) && !isZeroInit(initBody)) ||
+		wasStaticConst
 	if hoist {
 		gname := f.Name + "_" + name
 		// Prefer bare name when it matches a package-level harvest (mod_l's r).
-		if wasStaticConst && name != "" {
+		if name != "" {
 			gname = name
 		}
 		g := ir.Global{Name: gname, Type: typ, Cols: cols, Rows: rows}
@@ -3392,7 +4460,24 @@ func matchBraceFrom(s string, open int) (int, error) {
 		return -1, fmt.Errorf("not brace")
 	}
 	depth := 0
+	inChar := false
+	inString := false
 	for i := open; i < len(s); i++ {
+		if s[i] == '\\' && (inChar || inString) {
+			i++
+			continue
+		}
+		if s[i] == '\'' && !inString {
+			inChar = !inChar
+			continue
+		}
+		if s[i] == '"' && !inChar {
+			inString = !inString
+			continue
+		}
+		if inChar || inString {
+			continue
+		}
 		switch s[i] {
 		case '{':
 			depth++
@@ -3428,18 +4513,33 @@ func isZeroInit(s string) bool {
 }
 
 func flattenBraceInit(s string) string {
-	// keep digits and commas only
-	var b strings.Builder
-	for _, r := range s {
-		if (r >= '0' && r <= '9') || r == 'x' || r == 'X' || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') || r == ',' {
-			b.WriteRune(r)
-		} else if r == ' ' || r == '\t' || r == '\n' || r == '{' || r == '}' {
-			if b.Len() > 0 && b.String()[b.Len()-1] != ',' {
-				// skip
+	parts := splitCSV(strings.TrimSpace(s))
+	var out []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		p = strings.TrimPrefix(p, "{")
+		p = strings.TrimSuffix(p, "}")
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if strings.HasPrefix(p, "\"") && strings.HasSuffix(p, "\"") {
+			str, err := strconv.Unquote(p)
+			if err == nil {
+				for i := 0; i < len(str); i++ {
+					out = append(out, fmt.Sprintf("0x%02x", str[i]))
+				}
+				out = append(out, "0x00")
+				continue
 			}
 		}
+		if strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'") {
+			out = append(out, p)
+			continue
+		}
+		out = append(out, p)
 	}
-	return b.String()
+	return strings.Join(out, ", ")
 }
 
 // pending side channels for array-init decls (cleared per function)
@@ -3455,15 +4555,89 @@ type pendingAllocaItem struct {
 	init string
 }
 
+func normalizeDeclStmt(stClean string) string {
+	stClean = strings.TrimSpace(stClean)
+	for {
+		if strings.HasPrefix(stClean, "static ") {
+			stClean = strings.TrimSpace(stClean[7:])
+		} else if strings.HasPrefix(stClean, "const ") {
+			stClean = strings.TrimSpace(stClean[6:])
+		} else if strings.HasPrefix(stClean, "volatile ") {
+			stClean = strings.TrimSpace(stClean[9:])
+		} else if strings.HasPrefix(stClean, "register ") {
+			stClean = strings.TrimSpace(stClean[9:])
+		} else if strings.HasPrefix(stClean, "inline ") {
+			stClean = strings.TrimSpace(stClean[7:])
+		} else if strings.HasPrefix(stClean, "unsigned char ") {
+			stClean = "uint8_t " + strings.TrimSpace(stClean[14:])
+		} else if strings.HasPrefix(stClean, "unsigned short ") {
+			stClean = "uint16_t " + strings.TrimSpace(stClean[15:])
+		} else if strings.HasPrefix(stClean, "unsigned int ") {
+			stClean = "uint32_t " + strings.TrimSpace(stClean[13:])
+		} else if strings.HasPrefix(stClean, "unsigned long long ") {
+			stClean = "uint64_t " + strings.TrimSpace(stClean[19:])
+		} else if strings.HasPrefix(stClean, "unsigned long ") {
+			stClean = "uint64_t " + strings.TrimSpace(stClean[14:])
+		} else if strings.HasPrefix(stClean, "signed char ") {
+			stClean = "int8_t " + strings.TrimSpace(stClean[12:])
+		} else if strings.HasPrefix(stClean, "signed short ") {
+			stClean = "int16_t " + strings.TrimSpace(stClean[13:])
+		} else if strings.HasPrefix(stClean, "signed int ") {
+			stClean = "int32_t " + strings.TrimSpace(stClean[11:])
+		} else if strings.HasPrefix(stClean, "long long ") {
+			stClean = "int64_t " + strings.TrimSpace(stClean[10:])
+		} else if strings.HasPrefix(stClean, "unsigned __int64 ") || strings.HasPrefix(stClean, "unsigned __int64\t") || stClean == "unsigned __int64" {
+			stClean = "uint64_t " + strings.TrimSpace(stClean[16:])
+		} else if strings.HasPrefix(stClean, "__uint64_t ") || stClean == "__uint64_t" {
+			stClean = "uint64_t " + strings.TrimSpace(stClean[11:])
+		} else if strings.HasPrefix(stClean, "__int64 ") || strings.HasPrefix(stClean, "__int64\t") || stClean == "__int64" {
+			stClean = "int64_t " + strings.TrimSpace(stClean[8:])
+		} else if strings.HasPrefix(stClean, "unsigned __int128 ") || strings.HasPrefix(stClean, "unsigned __int128\t") || stClean == "unsigned __int128" {
+			stClean = "uint128_t " + strings.TrimSpace(stClean[17:])
+		} else if strings.HasPrefix(stClean, "__uint128_t ") || stClean == "__uint128_t" {
+			stClean = "uint128_t " + strings.TrimSpace(stClean[11:])
+		} else if strings.HasPrefix(stClean, "__int128 ") || strings.HasPrefix(stClean, "__int128\t") || stClean == "__int128" {
+			stClean = "int128_t " + strings.TrimSpace(stClean[8:])
+		} else if strings.HasPrefix(stClean, "unsigned ") {
+			stClean = "uint32_t " + strings.TrimSpace(stClean[9:])
+		} else if strings.HasPrefix(stClean, "signed ") {
+			stClean = "int32_t " + strings.TrimSpace(stClean[7:])
+		} else {
+			break
+		}
+	}
+	// Separate attached pointer asterisk on type: "uint8_t* p" -> "uint8_t * p"
+	if idx := strings.IndexByte(stClean, '*'); idx > 0 {
+		before := strings.TrimSpace(stClean[:idx])
+		if isTypeToken(before) {
+			rest := strings.TrimSpace(stClean[idx+1:])
+			if strings.HasPrefix(rest, "const ") {
+				rest = strings.TrimSpace(rest[6:])
+			}
+			stClean = before + " * " + rest
+		}
+	}
+	return stClean
+}
+
 func isTypeToken(s string) bool {
 	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "const")
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "struct")
+	s = strings.TrimSpace(s)
 	switch s {
-	case "void", "int", "char", "fe",
+	case "void", "int", "char", "short", "long", "fe", "bool", "_Bool",
 		"int8_t", "int16_t", "int32_t", "int64_t",
 		"uint8_t", "uint16_t", "uint32_t", "uint64_t",
-		"uint32", "uint64", "size_t", "u8", "u16", "u32", "u64",
+		"uint32", "uint64", "size_t", "uintptr_t", "u8", "u16", "u32", "u64",
 		"i8", "i16", "i32", "i64",
-		"float", "double", "float32", "float64":
+		"uint128_t", "int128_t", "u128", "i128", "uint128", "int128", "__uint128_t", "__int128_t", "__int128",
+		"nk_f64_t", "nk_f32_t", "nk_i32_t", "nk_u32_t", "nk_i64_t", "nk_u64_t", "nk_size_t",
+		"nk_f16_t", "nk_bf16_t", "nk_i8_t", "nk_u8_t",
+		"unsigned", "signed",
+		"float", "double", "float32", "float64",
+		"pt2Function", "ptr_lookup_fn", "stoken_t", "sfilter":
 		return true
 	default:
 		if isStructType(s, structEnv) {
@@ -3478,30 +4652,79 @@ func isTypeToken(s string) bool {
 	}
 }
 
+func intScalarReg(r regInfo) bool {
+	if !r.elemIndex && (r.typ == ir.TypInt || r.typ == ir.TypInt32 || r.typ == ir.TypInt64) {
+		return true
+	}
+	return false
+}
+
 func mapType(s string) ir.TypeName {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "static ")
+	s = strings.TrimPrefix(s, "inline ")
+	s = strings.TrimPrefix(s, "__inline__ ")
+	s = strings.TrimPrefix(s, "__inline ")
+	if !strings.Contains(s, "*") {
+		s = strings.TrimPrefix(s, "const ")
+		s = strings.TrimPrefix(s, "volatile ")
+	}
+	s = strings.TrimSpace(s)
 	switch s {
-	case "int", "int32_t", "i32":
+	case "bool", "_Bool":
+		return ir.TypBool
+	case "const char *", "const char*", "const char * const",
+		"char *", "char*", "unsigned char *", "unsigned char*", "const unsigned char *", "const unsigned char*", "uint8_t *", "uint8_t*", "u8 *", "u8*", "const u8 *", "const u8*":
+		return ir.TypeName("[]byte")
+	case "void *", "void*", "const void *", "const void*":
+		return ir.TypeName("any")
+	case "int", "int32_t", "i32", "nk_i32_t", "signed int", "cJSON_bool":
 		return ir.TypInt
-	case "int8_t", "i8", "signed char":
+	case "int8_t", "i8", "nk_i8_t", "signed char":
 		return ir.TypInt8
-	case "char", "uint8_t", "u8", "unsigned char":
+	case "char", "uint8_t", "u8", "nk_u8_t", "unsigned char":
 		return ir.TypUint8
-	case "int16_t", "i16", "short":
+	case "int16_t", "i16", "short", "signed short":
 		return ir.TypInt16
 	case "uint16_t", "u16", "unsigned short":
+		return ir.TypUint16
+	case "uint32_t", "uint32", "u32", "nk_u32_t", "unsigned int", "unsigned":
 		return ir.TypUint32
-	case "uint32_t", "uint32", "u32":
-		return ir.TypUint32
-	case "uint64_t", "uint64", "u64", "size_t":
+	case "uint64_t", "uint64", "u64", "size_t", "usize", "uintptr_t", "nk_u64_t", "nk_size_t", "unsigned long", "unsigned long long":
 		return ir.TypUint64
-	case "int64_t", "i64", "long long":
+	case "int64_t", "i64", "nk_i64_t", "long long", "long":
 		return ir.TypInt64
-	case "float", "float32":
+	case "uint128_t", "uint128", "u128", "unsigned __int128", "__uint128_t", "int128_t", "int128", "i128", "__int128", "__int128_t":
+		return ir.TypUint128
+	case "float", "float32", "nk_f32_t", "nk_f16_t", "nk_bf16_t":
 		return ir.TypFloat32
-	case "double", "float64":
+	case "double", "float64", "nk_f64_t":
 		return ir.TypFloat64
+	case "utf8proc_property_t", "utf8proc_property_t *", "utf8proc_property_t*", "const utf8proc_property_t*", "const utf8proc_property_t *",
+		"utf8proc_property_struct", "utf8proc_property_struct *", "utf8proc_property_struct*":
+		return ir.TypeName("*Utf8proc_property_t")
+	case "utf8proc_bool":
+		return ir.TypBool
+	case "utf8proc_int8_t":
+		return ir.TypInt8
+	case "utf8proc_uint8_t":
+		return ir.TypUint8
+	case "utf8proc_int16_t", "utf8proc_propval_t":
+		return ir.TypInt16
+	case "utf8proc_uint16_t":
+		return ir.TypUint32
+	case "utf8proc_int32_t":
+		return ir.TypInt32
+	case "utf8proc_uint32_t":
+		return ir.TypUint32
+	case "utf8proc_ssize_t", "utf8proc_size_t":
+		return ir.TypUint64
+	case "utf8proc_category_t", "utf8proc_bidi_class_t", "utf8proc_decomp_type_t", "utf8proc_boundclass_t":
+		return ir.TypInt
 	case "void":
 		return ir.TypVoid
+	case "pt2Function", "ptr_lookup_fn":
+		return ir.TypeName(s)
 	default:
 		if isStructType(s, structEnv) {
 			return ir.TypeName(s)

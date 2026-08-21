@@ -38,5 +38,11 @@ baseline_thresholds: #BenchMatrix & {
 			max_allocs:     2
 			max_latency_ns: 860000
 		}
+		"c2tuidiff_simd256_diffing": {
+			name:           "c2tuidiff 2D Grid SIMD256"
+			target_mbps:    3000.0
+			max_allocs:     0
+			max_latency_ns: 5000
+		}
 	}
 }

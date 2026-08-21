@@ -25,7 +25,7 @@ func FixturesFor(k Kind) []Fixture {
 	big := bytesOf(64*1024, 0x3C)
 
 	switch k {
-	case KindHash64, KindHash32, KindHash32Seed, KindUtf8Proc, KindFastlz1, KindMurmur128, KindLibInj:
+	case KindHash64, KindHash64Seed, KindHash32, KindHash32Seed, KindUtf8Proc, KindFastlz1, KindMurmur128, KindLibInj:
 		return []Fixture{
 			{Name: "empty", Data: nil, Seed: 0},
 			{Name: "hello", Data: hello, Seed: 0},

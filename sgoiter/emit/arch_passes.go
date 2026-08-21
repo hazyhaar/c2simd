@@ -1,7 +1,9 @@
 package emit
 
 import (
+	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -52,32 +54,131 @@ func archArrayNotSlice(src string) string {
 	return strings.Join(out, "\n")
 }
 
-// archInlineRotlWrappers removes tiny Rotl32 helpers and inlines bits.RotateLeft32.
-var reRotlDef = regexp.MustCompile(`(?s)func Rotl32\(x uint32, r uint8\) uint32 \{\s*return uint32\(bits\.RotateLeft32\(x, int\(r\)\)\)\s*\}\n*`)
-var reRotlCall = regexp.MustCompile(`Rotl32\(([^,]+),\s*uint8\((\d+)\)\)`)
-var reRotlCall2 = regexp.MustCompile(`Rotl32\(([^,]+),\s*(\d+)\)`)
+// archInlineRotlWrappers removes tiny Rotl32/Rotl64 helpers and inlines bits.RotateLeft32/64.
+var reRotlDef = regexp.MustCompile(`(?s)func Rotl32\(x uint32, r (?:uint8|int8|int32|uint32|int)\) uint32 \{\s*return (?:uint32\()?bits\.RotateLeft32\(x, int\(r\)\)\)?\s*\}\n*`)
+var reRotlCall = regexp.MustCompile(`Rotl32\(([^,]+),\s*(?:u?int(?:8|16|32|64)?\((\d+)\)|(\d+))\)`)
+
+var reRotl64Def = regexp.MustCompile(`(?s)func Rotl64\(x uint64, r (?:uint8|int8|int32|uint32|int|int8)\) uint64 \{\s*return (?:uint64\()?bits\.RotateLeft64\(x, int\(r\)\)\)?\s*\}\n*`)
+var reRotl64Call = regexp.MustCompile(`Rotl64\(([^,]+),\s*(?:u?int(?:8|16|32|64)?\((\d+)\)|(\d+))\)`)
 
 func archInlineRotlWrappers(src string) string {
-	if !strings.Contains(src, "Rotl32") {
-		return src
+	if strings.Contains(src, "Rotl32") {
+		src = reRotlDef.ReplaceAllString(src, "")
+		src = reRotlCall.ReplaceAllStringFunc(src, func(m string) string {
+			sub := reRotlCall.FindStringSubmatch(m)
+			if len(sub) > 0 {
+				arg1 := sub[1]
+				shift := sub[2]
+				if shift == "" {
+					shift = sub[3]
+				}
+				return fmt.Sprintf("bits.RotateLeft32(%s, %s)", arg1, shift)
+			}
+			return m
+		})
 	}
-	src = reRotlDef.ReplaceAllString(src, "")
-	src = reRotlCall.ReplaceAllString(src, `bits.RotateLeft32($1, $2)`)
-	src = reRotlCall2.ReplaceAllString(src, `bits.RotateLeft32($1, $2)`)
+	if strings.Contains(src, "Rotl64") {
+		src = reRotl64Def.ReplaceAllString(src, "")
+		src = reRotl64Call.ReplaceAllStringFunc(src, func(m string) string {
+			sub := reRotl64Call.FindStringSubmatch(m)
+			if len(sub) > 0 {
+				arg1 := sub[1]
+				shift := sub[2]
+				if shift == "" {
+					shift = sub[3]
+				}
+				return fmt.Sprintf("bits.RotateLeft64(%s, %s)", arg1, shift)
+			}
+			return m
+		})
+	}
 	return src
 }
 
-var reRotr64Def = regexp.MustCompile(`(?s)func Rotr64\(x uint64, n uint64\) uint64 \{\s*return uint64\(bits\.RotateLeft64\(x, 64-int\(n\)\)\)\s*\}\n*`)
-var reRotr64Call = regexp.MustCompile(`Rotr64\(([^,]+),\s*uint64\((\d+)\)\)`)
-var reRotr64Call2 = regexp.MustCompile(`Rotr64\(([^,]+),\s*(\d+)\)`)
+var (
+	rePack8Off = regexp.MustCompile(`\({7}uint64\(([A-Za-z0-9_]+)\[([^\]\+]+)\]\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*1\]\)\s*<<\s*8\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*2\]\)\s*<<\s*16\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*3\]\)\s*<<\s*24\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*4\]\)\s*<<\s*32\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*5\]\)\s*<<\s*40\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*6\]\)\s*<<\s*48\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*7\]\)\s*<<\s*56\)\)`)
+	rePack8_0  = regexp.MustCompile(`\({7}uint64\(([A-Za-z0-9_]+)\[0\]\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[1\]\)\s*<<\s*8\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[2\]\)\s*<<\s*16\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[3\]\)\s*<<\s*24\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[4\]\)\s*<<\s*32\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[5\]\)\s*<<\s*40\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[6\]\)\s*<<\s*48\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[7\]\)\s*<<\s*56\)\)`)
+
+	rePack8OffNum = regexp.MustCompile(`\({7}uint64\(([A-Za-z0-9_]+)\[([^\]\+]+)\s*\+\s*(\d+)\]\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*(\d+)\]\)\s*<<\s*8\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*(\d+)\]\)\s*<<\s*16\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*(\d+)\]\)\s*<<\s*24\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*(\d+)\]\)\s*<<\s*32\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*(\d+)\]\)\s*<<\s*40\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*(\d+)\]\)\s*<<\s*48\)\)\s*\|\s*\(uint64\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*(\d+)\]\)\s*<<\s*56\)\)`)
+	rePack4OffNum = regexp.MustCompile(`\({3}uint32\(([A-Za-z0-9_]+)\[([^\]\+]+)\s*\+\s*(\d+)\]\)\s*\|\s*\(uint32\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*(\d+)\]\)\s*<<\s*8\)\)\s*\|\s*\(uint32\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*(\d+)\]\)\s*<<\s*16\)\)\s*\|\s*\(uint32\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*(\d+)\]\)\s*<<\s*24\)\)`)
+
+	rePack4Off = regexp.MustCompile(`\({3}uint32\(([A-Za-z0-9_]+)\[([^\]\+]+)\]\)\s*\|\s*\(uint32\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*1\]\)\s*<<\s*8\)\)\s*\|\s*\(uint32\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*2\]\)\s*<<\s*16\)\)\s*\|\s*\(uint32\([A-Za-z0-9_]+\[[^\]\+]+\s*\+\s*3\]\)\s*<<\s*24\)\)`)
+	rePack4_0  = regexp.MustCompile(`\({3}uint32\(([A-Za-z0-9_]+)\[0\]\)\s*\|\s*\(uint32\([A-Za-z0-9_]+\[1\]\)\s*<<\s*8\)\)\s*\|\s*\(uint32\([A-Za-z0-9_]+\[2\]\)\s*<<\s*16\)\)\s*\|\s*\(uint32\([A-Za-z0-9_]+\[3\]\)\s*<<\s*24\)\)`)
+
+	reRead32LeDef = regexp.MustCompile(`(?s)func (?:Read32_le|load32_le)\(p \[\]byte\) uint32 \{\s*return [^\n]+\n\}`)
+	reRead64LeDef = regexp.MustCompile(`(?s)func (?:Read64_le|load64_le)\(p \[\]byte\) uint64 \{\s*(?:_\s*=\s*p\[7\]\s*)?return [^\n]+\n\}`)
+)
+
+func archFoldBytePacksToLittleEndian(src string) string {
+	src = reRead32LeDef.ReplaceAllString(src, "func Read32_le(p []byte) uint32 {\n\treturn binary.LittleEndian.Uint32(p)\n}")
+	src = reRead64LeDef.ReplaceAllString(src, "func Read64_le(p []byte) uint64 {\n\treturn binary.LittleEndian.Uint64(p)\n}")
+	src = rePack8OffNum.ReplaceAllStringFunc(src, func(m string) string {
+		sub := rePack8OffNum.FindStringSubmatch(m)
+		if len(sub) >= 11 {
+			startNum, _ := strconv.Atoi(sub[3])
+			match := true
+			for idx := 4; idx < 11; idx++ {
+				n, _ := strconv.Atoi(sub[idx])
+				if n != startNum+(idx-3) {
+					match = false
+					break
+				}
+			}
+			if match {
+				return fmt.Sprintf("binary.LittleEndian.Uint64(%s[%s+%d:])", sub[1], sub[2], startNum)
+			}
+		}
+		return m
+	})
+	src = rePack8Off.ReplaceAllString(src, `binary.LittleEndian.Uint64($1[$2:])`)
+	src = rePack8_0.ReplaceAllString(src, `binary.LittleEndian.Uint64($1)`)
+	src = rePack4OffNum.ReplaceAllStringFunc(src, func(m string) string {
+		sub := rePack4OffNum.FindStringSubmatch(m)
+		if len(sub) >= 7 {
+			startNum, _ := strconv.Atoi(sub[3])
+			match := true
+			for idx := 4; idx < 7; idx++ {
+				n, _ := strconv.Atoi(sub[idx])
+				if n != startNum+(idx-3) {
+					match = false
+					break
+				}
+			}
+			if match {
+				return fmt.Sprintf("binary.LittleEndian.Uint32(%s[%s+%d:])", sub[1], sub[2], startNum)
+			}
+		}
+		return m
+	})
+	src = rePack4Off.ReplaceAllString(src, `binary.LittleEndian.Uint32($1[$2:])`)
+	src = rePack4_0.ReplaceAllString(src, `binary.LittleEndian.Uint32($1)`)
+	src = regexp.MustCompile(`(?:uint64|uint32)\(binary\.LittleEndian\.Uint(64|32)\(([^)]+)\)\)`).ReplaceAllString(src, `binary.LittleEndian.Uint$1($2)`)
+	src = regexp.MustCompile(`(?:uint64|uint32)binary\.LittleEndian\.Uint(64|32)\(([^)]+)\)`).ReplaceAllString(src, `binary.LittleEndian.Uint$1($2)`)
+	src = strings.ReplaceAll(src, "uint64binary.LittleEndian", "binary.LittleEndian")
+	src = strings.ReplaceAll(src, "uint32binary.LittleEndian", "binary.LittleEndian")
+	return src
+}
+
+var reRotr64Def = regexp.MustCompile(`(?s)func Rotr64\(x uint64, n (?:uint8|int8|int32|uint32|uint64|int)\) uint64 \{\s*return (?:uint64\()?bits\.RotateLeft64\(x, 64-int\(n\)\)\)?\s*\}\n*`)
+var reRotr64Call = regexp.MustCompile(`Rotr64\(([^,]+),\s*(?:u?int(?:8|16|32|64)?\((\d+)\)|(\d+))\)`)
 
 func archInlineRotrWrappers(src string) string {
 	if !strings.Contains(src, "Rotr64") {
 		return src
 	}
 	src = reRotr64Def.ReplaceAllString(src, "")
-	src = reRotr64Call.ReplaceAllString(src, `bits.RotateLeft64($1, 64-$2)`)
-	src = reRotr64Call2.ReplaceAllString(src, `bits.RotateLeft64($1, 64-$2)`)
+	src = reRotr64Call.ReplaceAllStringFunc(src, func(m string) string {
+		sub := reRotr64Call.FindStringSubmatch(m)
+		if len(sub) > 0 {
+			arg1 := sub[1]
+			shift := sub[2]
+			if shift == "" {
+				shift = sub[3]
+			}
+			return fmt.Sprintf("bits.RotateLeft64(%s, 64-%s)", arg1, shift)
+		}
+		return m
+	})
 	return src
 }
 
@@ -157,3 +258,78 @@ func archOptimizeEndianHelpers(src string) string {
 func archNormalizeNegInduction(src string) string {
 	return src
 }
+
+// archNormalize3ClauseLoops restaure la syntaxe Go 3-clauses `for i = 0; i < N; i++ { ... }`.
+func archNormalize3ClauseLoops(src string) string {
+	lines := strings.Split(src, "\n")
+	var out []string
+	i := 0
+	for i < len(lines) {
+		ln := lines[i]
+		trim := strings.TrimSpace(ln)
+		if (strings.Contains(trim, " = ") || strings.Contains(trim, " := ")) && !strings.HasPrefix(trim, "//") && !strings.HasPrefix(trim, "var ") {
+			sep := " = "
+			if strings.Contains(trim, " := ") {
+				sep = " := "
+			}
+			parts := strings.SplitN(trim, sep, 2)
+			varName := strings.TrimSpace(parts[0])
+			initVal := strings.TrimSpace(parts[1])
+			if isSimpleIdent(varName) && i+1 < len(lines) {
+				nextLn := lines[i+1]
+				nextTrim := strings.TrimSpace(nextLn)
+				if strings.HasPrefix(nextTrim, "for "+varName+" ") && strings.HasSuffix(nextTrim, "{") {
+					cond := strings.TrimSpace(nextTrim[len("for ") : len(nextTrim)-1])
+					depth := 1
+					j := i + 2
+					var bodyLines []string
+					for j < len(lines) && depth > 0 {
+						l := lines[j]
+						t := strings.TrimSpace(l)
+						if strings.HasSuffix(t, "{") {
+							depth++
+						}
+						if t == "}" || strings.HasPrefix(t, "}") {
+							depth--
+						}
+						if depth > 0 {
+							bodyLines = append(bodyLines, l)
+						}
+						j++
+					}
+					if depth == 0 && len(bodyLines) > 0 {
+						lastBody := strings.TrimSpace(bodyLines[len(bodyLines)-1])
+						post := ""
+						if lastBody == varName+"++" {
+							post = varName + "++"
+						} else if strings.HasPrefix(lastBody, varName+" += ") {
+							post = lastBody
+						} else if strings.HasPrefix(lastBody, varName+" = "+varName+" + ") {
+							step := lastBody[len(varName+" = "+varName+" + "):]
+							post = varName + " += " + step
+						}
+						hasContinue := false
+						for _, bl := range bodyLines {
+							if strings.Contains(bl, "continue") {
+								hasContinue = true
+								break
+							}
+						}
+						if post != "" && !hasContinue {
+							pad := ln[:len(ln)-len(strings.TrimLeft(ln, " \t"))]
+							inner := strings.Join(bodyLines[:len(bodyLines)-1], "\n")
+							newLoop := fmt.Sprintf("%sfor %s %s %s; %s; %s {\n%s\n%s}", pad, varName, strings.TrimSpace(sep), initVal, cond, post, inner, pad)
+							out = append(out, newLoop)
+							i = j
+							continue
+						}
+					}
+				}
+			}
+		}
+		out = append(out, ln)
+		i++
+	}
+	return strings.Join(out, "\n")
+}
+

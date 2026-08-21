@@ -9,6 +9,7 @@ type Kind string
 
 const (
 	KindHash64     Kind = "hash64"      // h(data,len) → u64
+	KindHash64Seed Kind = "hash64_seed" // h(data,len,seed) → u64
 	KindHash32     Kind = "hash32"      // h(data,len) → u32
 	KindHash32Seed Kind = "hash32_seed" // h(data,len,seed) → u32
 	KindSipHash    Kind = "siphash"     // h(data,len,key16) → u64
@@ -76,5 +77,19 @@ func DefaultLibs(c2simdRoot string) []Lib {
 		{ID: "strlenspn_lab", Kind: KindLibInj, CRel: filepath.Join(cs, "strlenspn_lab.c"), CFunc: "strlenspn_lab", SgoFunc: "Strlenspn_lab", CcgoFunc: "strlenspn_lab", Notes: "oracle C for strspn-like"},
 		// Full MD5 64-step (optional dogfood; reduced md5_transform stays default).
 		{ID: "md5_transform_full", Kind: KindMD5, CRel: filepath.Join(cs, "md5_transform_full.c"), CFunc: "md5_transform_full_block", SgoFunc: "Md5_transform_full_block", CcgoFunc: "md5_transform_full_block", Notes: "full 64-step MD5"},
+		// xxHash64 core round and loop
+		{ID: "xxhash64_core", Kind: KindHash64Seed, CRel: filepath.Join(cs, "xxhash_core.c"), CFunc: "xxhash64_core", SgoFunc: "Xxhash64_core", CcgoFunc: "xxhash64_core", Notes: "xxHash64 core round and loop"},
+		// miniz Adler-32 unrolled checksum
+		{ID: "miniz_adler32", Kind: KindHash32, CRel: filepath.Join(cs, "miniz_adler32.c"), CFunc: "miniz_adler32", SgoFunc: "Miniz_adler32", CcgoFunc: "miniz_adler32", Notes: "miniz Adler-32 unrolled checksum"},
+		// stb_image CRC32 bitwise table-free
+		{ID: "stbi_crc_dogfood", Kind: KindHash32, CRel: filepath.Join(cs, "stbi_crc_dogfood.c"), CFunc: "stbi_crc32_dogfood", SgoFunc: "Stbi_crc32_dogfood", CcgoFunc: "stbi_crc32_dogfood", Notes: "stb_image CRC32 table-free bitwise checksum"},
+		// yyjson digit counter
+		{ID: "yyjson_digit_dogfood", Kind: KindHash64, CRel: filepath.Join(cs, "yyjson_digit_dogfood.c"), CFunc: "yyjson_count_digits_dogfood", SgoFunc: "Yyjson_count_digits_dogfood", CcgoFunc: "yyjson_count_digits_dogfood", Notes: "yyjson digit scanner"},
+		// utf8proc 2-byte iterator
+		{ID: "utf8_iterate_dogfood", Kind: KindHash64, CRel: filepath.Join(cs, "utf8_iterate_dogfood.c"), CFunc: "utf8_iterate2_dogfood", SgoFunc: "Utf8_iterate2_dogfood", CcgoFunc: "utf8_iterate2_dogfood", Notes: "utf8proc fast UTF-8 iterator"},
+		// QuickJS min/max fold
+		{ID: "quickjs_minmax_dogfood", Kind: KindHash64, CRel: filepath.Join(cs, "quickjs_minmax_dogfood.c"), CFunc: "quickjs_minmax_fold", SgoFunc: "Quickjs_minmax_fold", CcgoFunc: "quickjs_minmax_fold", Notes: "QuickJS min/max vector fold"},
+		// SimSIMD L2 squared distance
+		{ID: "simsimd_l2sq_f32", Kind: KindDotF32, CRel: filepath.Join(cs, "simsimd_l2sq_f32.c"), CFunc: "simsimd_l2sq_f32", SgoFunc: "Simsimd_l2sq_f32", CcgoFunc: "simsimd_l2sq_f32", Notes: "SimSIMD L2 squared distance float32"},
 	}
 }

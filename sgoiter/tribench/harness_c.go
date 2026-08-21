@@ -19,6 +19,8 @@ func GenHarnessC(lib Lib) string {
 	switch lib.Kind {
 	case KindHash64:
 		fmt.Fprintf(&b, "uint64_t %s(const uint8_t *data, size_t len);\n", lib.CFunc)
+	case KindHash64Seed:
+		fmt.Fprintf(&b, "uint64_t %s(const uint8_t *data, size_t len, uint64_t seed);\n", lib.CFunc)
 	case KindHash32:
 		fmt.Fprintf(&b, "uint32_t %s(const uint8_t *data, size_t len);\n", lib.CFunc)
 	case KindHash32Seed:
@@ -94,6 +96,8 @@ static void hex_buf(const uint8_t *p, size_t n) {
 		switch lib.Kind {
 		case KindHash64:
 			fmt.Fprintf(&b, "  { uint64_t h = %s(d%d, %d); hex_u64(h); printf(\"\\n\"); }\n", lib.CFunc, i, len(f.Data))
+		case KindHash64Seed:
+			fmt.Fprintf(&b, "  { uint64_t h = %s(d%d, %d, %dULL); hex_u64(h); printf(\"\\n\"); }\n", lib.CFunc, i, len(f.Data), f.Seed)
 		case KindHash32:
 			fmt.Fprintf(&b, "  { uint32_t h = %s(d%d, %d); hex_u32(h); printf(\"\\n\"); }\n", lib.CFunc, i, len(f.Data))
 		case KindHash32Seed:

@@ -1,5 +1,5 @@
-# sgoiter — targets locaux (GOWORK=off)
 export GOWORK=off
+export PATH := /home/cl-ment/sdk/go1.27rc3/bin:/home/cl-ment/go/bin:$(PATH)
 ROOT := $(abspath ..)
 BIN  := $(ROOT)/bin
 

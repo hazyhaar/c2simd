@@ -31,8 +31,13 @@ func stripIfDefs(src string) string {
 		trim := strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(trim, "#if") || strings.HasPrefix(trim, "#ifdef") || strings.HasPrefix(trim, "#ifndef"):
-			// prefer skipping arch-specific first branch if #else exists later — keep true branch by default
-			stack = append(stack, frame{keep: true, seenElse: false})
+			keep := true
+			if strings.HasPrefix(trim, "#ifdef SWIG") || strings.HasPrefix(trim, "#ifdef __cplusplus") || trim == "#if 0" || strings.HasPrefix(trim, "#if 0 ") || strings.HasPrefix(trim, "#ifdef ENABLE_LOCALES") || strings.HasPrefix(trim, "#ifdef CJSON_GLOBAL") {
+				keep = false
+			} else if strings.HasPrefix(trim, "#ifndef SWIG") || strings.HasPrefix(trim, "#ifndef __cplusplus") || trim == "#if 1" || strings.HasPrefix(trim, "#if 1 ") {
+				keep = true
+			}
+			stack = append(stack, frame{keep: keep, seenElse: false})
 			continue
 		case strings.HasPrefix(trim, "#else"):
 			if len(stack) == 0 {
@@ -60,6 +65,9 @@ func stripIfDefs(src string) string {
 			continue
 		}
 		if keeping() {
+			if strings.HasPrefix(trim, "%") {
+				continue
+			}
 			out = append(out, line)
 		}
 	}
@@ -157,9 +165,11 @@ func foldLocalIncludes(src, cDir string) (string, error) {
 			continue
 		}
 		for d := abs; ; d = filepath.Dir(d) {
-			cand := filepath.Join(d, "spec", "c_sources")
-			if st, err := os.Stat(cand); err == nil && st.IsDir() {
-				roots = append(roots, cand)
+			for _, sub := range []string{"spec/c_sources", "include", "."} {
+				cand := filepath.Join(d, sub)
+				if st, err := os.Stat(cand); err == nil && st.IsDir() {
+					roots = append(roots, cand)
+				}
 			}
 			if filepath.Dir(d) == d {
 				break
@@ -174,18 +184,24 @@ func foldLocalIncludes(src, cDir string) (string, error) {
 	fold = func(s string) string {
 		return re.ReplaceAllStringFunc(s, func(m string) string {
 			name := re.FindStringSubmatch(m)[1]
-			// only fold headers; .c data includes (utf8proc_data.c) stay for later drop
-			if !strings.HasSuffix(name, ".h") {
+			// only fold headers and local .c data includes (e.g. utf8proc_data.c)
+			if !strings.HasSuffix(name, ".h") && !strings.HasSuffix(name, ".c") {
 				return m
 			}
 			for _, root := range roots {
 				cand := filepath.Join(root, name)
+				if _, err := os.Stat(cand); err != nil {
+					candGen := cand + ".generic"
+					if st, err := os.Stat(candGen); err == nil && !st.IsDir() {
+						cand = candGen
+					}
+				}
 				if visited[cand] {
 					return "/* include " + name + " */"
 				}
 				if st, err := os.Stat(cand); err == nil && !st.IsDir() {
-					// skip huge headers (yyjson.h ~330KiB) — avoid harvest hang
-					if st.Size() > 64*1024 {
+					// skip excessively huge files (>4MiB)
+					if st.Size() > 4*1024*1024 {
 						visited[cand] = true
 						return "/* include " + name + " omitted (large) */"
 					}
@@ -197,6 +213,9 @@ func foldLocalIncludes(src, cDir string) (string, error) {
 					}
 					return "\n" + fold(string(b)) + "\n"
 				}
+			}
+			if strings.HasSuffix(name, "_export.h") || strings.HasSuffix(name, "_api.h") || strings.HasSuffix(name, "_config.h") || name == "config.h" || name == "endian.h" || name == "sys/endian.h" || name == "byteswap.h" || name == "windows.h" {
+				return "/* optional include " + name + " omitted */"
 			}
 			missing = append(missing, name)
 			return m
@@ -210,7 +229,7 @@ func foldLocalIncludes(src, cDir string) (string, error) {
 	return out, nil
 }
 
-var asmBarrierRe = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_])(?:__asm__|asm)[ \t]+volatile[ \t]*\(`)
+var asmBarrierRe = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_])(?:__asm__|asm)[ \t]*(?:volatile[ \t]*)?\(`)
 
 func foldDefines(src string) string {
 	src = stripIfDefs(src)
@@ -219,7 +238,21 @@ func foldDefines(src string) string {
 		body string
 	}
 	var objs []objDef
-	funcRepl := map[string]string{} // name -> body with $1 for first arg simple
+	funcRepl := map[string]string{
+		"likely":           "(@ARG0@)",
+		"unlikely":         "(@ARG0@)",
+		"FASTLZ_LIKELY":    "(@ARG0@)",
+		"FASTLZ_UNLIKELY":  "(@ARG0@)",
+		"yyjson_likely":    "(@ARG0@)",
+		"yyjson_unlikely":  "(@ARG0@)",
+		"YYJSON_LIKELY":    "(@ARG0@)",
+		"YYJSON_UNLIKELY":  "(@ARG0@)",
+		"XXH_LIKELY":       "(@ARG0@)",
+		"XXH_UNLIKELY":     "(@ARG0@)",
+		"yyjson_constcast": "(@ARG0@)",
+		"constcast":        "(@ARG0@)",
+		"__builtin_expect": "@ARG0@",
+	} // name -> body with @ARG0@ for single-arg simple
 
 	// join backslash-continued lines before define parse
 	rawLines := strings.Split(src, "\n")
@@ -251,19 +284,21 @@ func foldDefines(src string) string {
 				p := params[0]
 				b := body
 				if b == p || b == "("+p+")" {
-					funcRepl[name] = "($ARG)"
+					funcRepl[name] = "(@ARG0@)"
+				} else if b == "#"+p || b == "# "+p {
+					funcRepl[name] = "\"@ARG0@\""
 				} else if strings.Contains(b, "__builtin_expect") {
-					funcRepl[name] = "($ARG)"
+					funcRepl[name] = "(@ARG0@)"
 				} else if strings.Contains(b, p) {
-					funcRepl[name] = strings.ReplaceAll(b, p, "$ARG")
+					re := regexp.MustCompile(`\b` + regexp.QuoteMeta(p) + `\b`)
+					funcRepl[name] = re.ReplaceAllLiteralString(b, "@ARG0@")
 				}
 			} else if len(params) >= 2 && body != "" {
 				// multi-arg: #define FOR(i,n) for (i = 0; i < n; ++i)
-				// NOTE: placeholders must NOT use $ — regexp.ReplaceAllString treats $ as group refs.
 				b := body
 				for i, p := range params {
 					re := regexp.MustCompile(`\b` + regexp.QuoteMeta(p) + `\b`)
-					b = re.ReplaceAllString(b, fmt.Sprintf("@ARG%d@", i))
+					b = re.ReplaceAllLiteralString(b, fmt.Sprintf("@ARG%d@", i))
 				}
 				funcRepl[name] = b
 			}
@@ -271,15 +306,43 @@ func foldDefines(src string) string {
 			continue
 		}
 		if body == "" {
-			// flag define like FLZ_ARCH64 — expand to 1
-			objs = append(objs, objDef{name, "1"})
+			objs = append(objs, objDef{name, ""})
 			continue
+		}
+		if name == "UTF8PROC_VERSION" {
+			body = `"2.11.3"`
 		}
 		objs = append(objs, objDef{name, body})
 	}
 
+	// extract C enum definitions and merge into constant pool
+	enums := harvestEnums(src)
+	for k, v := range enums {
+		objs = append(objs, objDef{k, strconv.FormatInt(v, 10)})
+	}
+	objs = append(objs, objDef{"DBL_EPSILON", "2.2204460492503131e-16"})
+	objs = append(objs, objDef{"FLT_EPSILON", "1.19209290e-7"})
+	objs = append(objs, objDef{"INT_MAX", "2147483647"})
+	objs = append(objs, objDef{"INT_MIN", "-2147483648"})
+	objs = append(objs, objDef{"UINT_MAX", "4294967295"})
+	objs = append(objs, objDef{"SIZE_MAX", "18446744073709551615"})
+	objs = append(objs, objDef{"SSIZE_MAX", "9223372036854775807"})
+	objs = append(objs, objDef{"NULL", "0"})
+	objs = append(objs, objDef{"null", "0"})
+	objs = append(objs, objDef{"UTF8PROC_VERSION", "\"2.11.3\""})
+	objs = append(objs, objDef{"__LINE__", "1"})
+	objs = append(objs, objDef{"__UINT64_TYPE__", "uint64_t"})
+	objs = append(objs, objDef{"__INT64_TYPE__", "int64_t"})
+	objs = append(objs, objDef{"__UINT32_TYPE__", "uint32_t"})
+	objs = append(objs, objDef{"__INT32_TYPE__", "int32_t"})
+	objs = append(objs, objDef{"__SIZE_TYPE__", "size_t"})
+	objs = append(objs, objDef{"__UINTPTR_TYPE__", "uintptr_t"})
+
 	// evaluate object macros to integers when possible (multi-pass)
 	vals := map[string]int64{}
+	for k, v := range enums {
+		vals[k] = v
+	}
 	for pass := 0; pass < 16; pass++ {
 		progress := false
 		for _, d := range objs {
@@ -305,8 +368,8 @@ func foldDefines(src string) string {
 			objRepl[d.name] = strconv.FormatInt(n, 10)
 			continue
 		}
-		// multi-stmt / do-while bodies: no paren wrap
-		if strings.Contains(d.body, ";") || strings.Contains(d.body, "{") {
+		// empty / multi-stmt / do-while bodies / string literals: no paren wrap
+		if d.body == "" || strings.Contains(d.body, ";") || strings.Contains(d.body, "{") || (strings.HasPrefix(d.body, "\"") && strings.HasSuffix(d.body, "\"")) {
 			objRepl[d.name] = d.body
 		} else {
 			objRepl[d.name] = "(" + d.body + ")"
@@ -327,37 +390,49 @@ func foldDefines(src string) string {
 	expandFuncs := func(text string) string {
 		// nested-paren aware call match: NAME( ... )
 		for name, body := range funcRepl {
+			if !strings.Contains(text, name) {
+				continue
+			}
+			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*\(`)
+			var b strings.Builder
+			last := 0
 			for {
-				re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\s*\(`)
-				loc := re.FindStringIndex(text)
+				loc := re.FindStringIndex(text[last:])
 				if loc == nil {
+					b.WriteString(text[last:])
 					break
 				}
-				open := loc[1] - 1 // '('
+				start := last + loc[0]
+				open := last + loc[1] - 1
 				close, err := matchParenStr(text, open)
 				if err != nil {
+					b.WriteString(text[last:])
 					break
 				}
+				b.WriteString(text[last:start])
 				argStr := text[open+1 : close]
-				var repl string
-				if strings.Contains(body, "@ARG0@") {
-					args := splitDefineArgs(argStr)
-					repl = body
-					for i, a := range args {
-						repl = strings.ReplaceAll(repl, fmt.Sprintf("@ARG%d@", i), a)
-					}
-				} else {
-					repl = strings.ReplaceAll(body, "$ARG", strings.TrimSpace(argStr))
+				args := splitDefineArgs(argStr)
+				repl := body
+				for i, a := range args {
+					repl = strings.ReplaceAll(repl, fmt.Sprintf("@ARG%d@", i), a)
 				}
-				text = text[:loc[0]] + repl + text[close+1:]
+				if len(args) > 0 {
+					repl = strings.ReplaceAll(repl, "$ARG", strings.TrimSpace(argStr))
+				}
+				b.WriteString(repl)
+				last = close + 1
 			}
+			text = b.String()
 		}
 		return text
 	}
 	expandObjs := func(text string) string {
 		for _, name := range names {
+			if !strings.Contains(text, name) {
+				continue
+			}
 			re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
-			text = re.ReplaceAllString(text, objRepl[name])
+			text = re.ReplaceAllLiteralString(text, objRepl[name])
 		}
 		return text
 	}
@@ -370,6 +445,14 @@ func foldDefines(src string) string {
 		text = next
 	}
 
+	text = strings.ReplaceAll(text, "##", "")
+	reStrConcat := regexp.MustCompile(`"([^"\n]*)"\s*"([^"\n]*)"`)
+	for pass := 0; pass < 8; pass++ {
+		if !reStrConcat.MatchString(text) {
+			break
+		}
+		text = reStrConcat.ReplaceAllString(text, `"$1$2"`)
+	}
 	// drop remaining # lines (include, if, pragma, undef, …)
 	var final []string
 	for _, line := range strings.Split(text, "\n") {
@@ -378,7 +461,61 @@ func foldDefines(src string) string {
 		}
 		final = append(final, line)
 	}
-	return strings.Join(final, "\n")
+	res := strings.Join(final, "\n")
+	return foldSizeof(res)
+}
+
+func foldSizeof(src string) string {
+	reSizeof := regexp.MustCompile(`\bsizeof\s*\(`)
+	var b strings.Builder
+	last := 0
+	for {
+		loc := reSizeof.FindStringIndex(src[last:])
+		if loc == nil {
+			b.WriteString(src[last:])
+			break
+		}
+		start := last + loc[0]
+		open := last + loc[1] - 1
+		close, err := matchParenStr(src, open)
+		if err != nil {
+			b.WriteString(src[last:])
+			break
+		}
+		b.WriteString(src[last:start])
+		inner := strings.TrimSpace(src[open+1 : close])
+		t := strings.TrimSpace(inner)
+		t = strings.TrimPrefix(t, "struct ")
+		t = strings.TrimPrefix(t, "union ")
+		val := "16"
+		switch t {
+		case "char", "uint8_t", "int8_t", "u8", "i8", "bool", "_Bool", "unsigned char", "signed char":
+			val = "1"
+		case "short", "uint16_t", "int16_t", "u16", "i16", "unsigned short", "signed short":
+			val = "2"
+		case "int", "uint32_t", "int32_t", "u32", "i32", "unsigned int", "signed int", "float", "float32":
+			val = "4"
+		case "long", "long long", "uint64_t", "int64_t", "u64", "i64", "usize", "size_t", "uintptr_t", "double", "float64", "unsigned long", "unsigned long long":
+			val = "8"
+		case "uint128_t", "int128_t", "u128", "i128", "__uint128_t", "unsigned __int128":
+			val = "16"
+		default:
+			if strings.HasSuffix(t, "*") {
+				val = "8"
+			} else if st := findStruct(t, structEnv); st != nil {
+				val = strconv.Itoa(estimateStructSize(st))
+			} else {
+				// Identifiant de variable ou tableau local : ne pas replier ici,
+				// laisser front.go évaluer la vraie taille depuis regs[var].localArr.
+				b.WriteString(src[start : close+1])
+				last = close + 1
+				continue
+			}
+		}
+		b.WriteString(val)
+		last = close + 1
+	}
+	return b.String()
 }
 
 func matchParenStr(s string, open int) (int, error) {
@@ -457,6 +594,8 @@ func evalDefineExpr(expr string, vals map[string]int64) (int64, bool) {
 // evalIntExpr: + - * / << >> & | ^ and parens, integers.
 func evalIntExpr(s string) (int64, bool) {
 	s = strings.TrimSpace(s)
+	reCast := regexp.MustCompile(`\(\s*(?:const\s+)?(?:uint(?:8|16|32|64)?_t|int(?:8|16|32|64)?_t|u(?:8|16|32|64)|i(?:8|16|32|64)|unsigned(?:\s+(?:int|char|short|long))?|signed(?:\s+(?:int|char|short|long))?|int|char|short|long|size_t|uintptr_t)\s*\)`)
+	s = reCast.ReplaceAllString(s, "")
 	var pos int
 	var parse func() (int64, bool)
 	peek := func() byte {
@@ -638,4 +777,50 @@ func evalIntExpr(s string) (int64, bool) {
 		return 0, false
 	}
 	return v, true
+}
+
+// harvestEnums parses C enum definitions into integer mappings.
+func harvestEnums(src string) map[string]int64 {
+	out := map[string]int64{}
+	src = stripComments(src)
+	re := regexp.MustCompile(`(?s)(?:typedef\s+)?enum(?:\s+[A-Za-z0-9_]+)?\s*\{(.*?)\}(?:\s*[A-Za-z0-9_]+)?\s*;`)
+	for _, m := range re.FindAllStringSubmatch(src, -1) {
+		body := m[1]
+		val := int64(0)
+		for _, item := range strings.Split(body, ",") {
+			item = strings.TrimSpace(stripComments(item))
+			if item == "" {
+				continue
+			}
+			if eq := strings.IndexByte(item, '='); eq >= 0 {
+				name := strings.TrimSpace(item[:eq])
+				rhs := strings.TrimSpace(item[eq+1:])
+				rhsClean := strings.TrimPrefix(strings.TrimPrefix(rhs, "(int)"), "(char)")
+				rhsClean = strings.TrimSpace(rhsClean)
+				if len(rhsClean) >= 3 && rhsClean[0] == '\'' && rhsClean[len(rhsClean)-1] == '\'' {
+					inner := rhsClean[1 : len(rhsClean)-1]
+					if inner == `\\` {
+						val = int64('\\')
+					} else if inner == `\0` {
+						val = 0
+					} else if len(inner) == 1 {
+						val = int64(inner[0])
+					}
+					out[name] = val
+				} else if v, ok := evalDefineExpr(rhsClean, out); ok {
+					val = v
+					out[name] = val
+				} else if v, err := strconv.ParseInt(rhsClean, 0, 64); err == nil {
+					val = v
+					out[name] = val
+				} else {
+					out[name] = val
+				}
+			} else {
+				out[item] = val
+			}
+			val++
+		}
+	}
+	return out
 }

@@ -26,6 +26,20 @@ const (
 	OpNot    // dst = ^x (bitwise not)
 	OpField  // dst = arg0->Sym  (struct field; if array field, dst is slice header)
 	OpFStore // arg0->Sym = arg1  or arg0->Sym[arg2]=arg1
+	OpBreak
+	OpContinue
+	OpGoto
+	OpLabel
+	// Opcodes vectoriels SIMD (Go 1.27 archsimd / portable simd)
+	OpVecLoad
+	OpVecStore
+	OpVecAdd
+	OpVecSub
+	OpVecMul
+	OpVecFMA
+	OpVecCmpEq
+	OpVecToBits
+	OpVecReduceSum
 )
 
 func (o Op) String() string {
@@ -33,6 +47,9 @@ func (o Op) String() string {
 		"Nop", "Const", "Mov", "Add", "Sub", "Mul", "Div", "Mod",
 		"And", "Or", "Xor", "Shl", "Shr", "Return", "Call",
 		"Load", "Store", "Alloca", "Not", "Field", "FStore",
+		"Break", "Continue", "Goto", "Label",
+		"VecLoad", "VecStore", "VecAdd", "VecSub", "VecMul", "VecFMA",
+		"VecCmpEq", "VecToBits", "VecReduceSum",
 	}
 	if int(o) < len(names) {
 		return names[o]
@@ -40,22 +57,36 @@ func (o Op) String() string {
 	return "?"
 }
 
-// TypeName is a subset scalar / pointer-elem type name.
+// TypeName is a subset scalar / pointer-elem / vector type name.
 type TypeName string
 
 const (
-	TypInt    TypeName = "int"
-	TypInt8   TypeName = "int8"
-	TypInt16  TypeName = "int16"
-	TypInt32  TypeName = "int32"
-	TypInt64  TypeName = "int64"
-	TypUint8   TypeName = "uint8"
-	TypUint32  TypeName = "uint32"
-	TypUint64  TypeName = "uint64"
-	TypFloat32 TypeName = "float32"
-	TypFloat64 TypeName = "float64"
-	TypBool    TypeName = "bool"
-	TypVoid    TypeName = "void"
+	TypInt        TypeName = "int"
+	TypInt8       TypeName = "int8"
+	TypInt16      TypeName = "int16"
+	TypInt32      TypeName = "int32"
+	TypInt64      TypeName = "int64"
+	TypUint8      TypeName = "uint8"
+	TypUint16     TypeName = "uint16"
+	TypUint32     TypeName = "uint32"
+	TypUint64     TypeName = "uint64"
+	TypFloat32    TypeName = "float32"
+	TypFloat64    TypeName = "float64"
+	TypBool       TypeName = "bool"
+	TypString     TypeName = "string"
+	TypUint128    TypeName = "uint128"
+	TypVoid       TypeName = "void"
+	// Types vectoriels SIMD
+	TypVecUint8x16   TypeName = "vec_uint8x16"
+	TypVecUint8x32   TypeName = "vec_uint8x32"
+	TypVecUint32x4   TypeName = "vec_uint32x4"
+	TypVecUint32x8   TypeName = "vec_uint32x8"
+	TypVecUint64x2   TypeName = "vec_uint64x2"
+	TypVecUint64x4   TypeName = "vec_uint64x4"
+	TypVecFloat32x4  TypeName = "vec_float32x4"
+	TypVecFloat32x8  TypeName = "vec_float32x8"
+	TypVecFloat64x2  TypeName = "vec_float64x2"
+	TypVecFloat64x4  TypeName = "vec_float64x4"
 )
 
 // Value is a virtual register index, or -1 for none.
@@ -117,11 +148,12 @@ type Stmt struct {
 	CondNot  bool   `json:"cond_not,omitempty"` // if (!x)
 }
 
-// SwitchCase is one case label (Fallthrough if empty body means fall into next).
+// SwitchCase is one case label. Fall is C implicit fallthrough (no break/return).
 type SwitchCase struct {
 	// Labels empty ⇒ default
 	Labels []int64 `json:"labels,omitempty"`
 	Body   []Stmt  `json:"body,omitempty"`
+	Fall   bool    `json:"fall,omitempty"`
 }
 
 // Func is one function.
@@ -137,6 +169,8 @@ type Func struct {
 	// Static marks a C `static` function: an internal helper, not an entry
 	// point. Root-closure emission keeps it only when something reachable calls it.
 	Static bool `json:"static,omitempty"`
+	// LocalNames maps virtual register values to original C variable names.
+	LocalNames map[Value]string `json:"local_names,omitempty"`
 }
 
 // Param is a function parameter.
@@ -157,6 +191,7 @@ type Global struct {
 	Type    TypeName `json:"type,omitempty"` // element; default uint8
 	ZeroLen int      `json:"zero_len,omitempty"`
 	InitCSV string   `json:"init_csv,omitempty"` // raw C init list (flattened)
+	Value   int64    `json:"value,omitempty"`
 	// Cols > 0 : table was T name[Rows][Cols], stored row-major flat; index [i][j] → i*Cols+j.
 	Cols int `json:"cols,omitempty"`
 	Rows int `json:"rows,omitempty"`

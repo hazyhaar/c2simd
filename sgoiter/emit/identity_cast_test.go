@@ -73,8 +73,8 @@ func TestRodataTablesAreNotSlices(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		`const b64_table = "ABCDEF"`,
-		"var blake2b_sigma = [4]byte{0, 1, 2, 3}",
+		`const B64_table = "ABCDEF"`,
+		"var Blake2b_sigma = [4]byte{0, 1, 2, 3}",
 		"var K = [2]uint64{0x428a2f98d728ae22, 0x7137449123ef65cd}",
 	} {
 		if !strings.Contains(src, want) {

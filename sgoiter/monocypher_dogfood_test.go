@@ -20,9 +20,24 @@ func TestMonocypherSgoiterDogfoodKATs(t *testing.T) {
 		}
 		t.Skip("dogfood sgoiter_out absent: ", root)
 	}
-	cmd := exec.Command("go", "test", "-count=1", ".")
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		goBin = filepath.Join(runtime.GOROOT(), "bin", "go")
+	}
+	cmd := exec.Command(goBin, "test", "-count=1", ".")
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "GOWORK=off", "GOTOOLCHAIN=local")
+	var cleanEnv []string
+	for _, e := range os.Environ() {
+		if len(e) >= 7 && e[:7] == "GOWORK=" {
+			continue
+		}
+		if len(e) >= 12 && e[:12] == "GOTOOLCHAIN=" {
+			continue
+		}
+		cleanEnv = append(cleanEnv, e)
+	}
+	cleanEnv = append(cleanEnv, "GOWORK=off", "GOTOOLCHAIN=go1.27.0")
+	cmd.Env = cleanEnv
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("dogfood KAT failed: %v\n%s", err, out)

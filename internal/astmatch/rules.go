@@ -8,9 +8,9 @@ package astmatch
 type RuleKind string
 
 const (
-	KindRewrite           RuleKind = "rewrite"
-	KindHandwritePointer  RuleKind = "handwrite_pointer"
-	KindDeclared          RuleKind = "declared"
+	KindRewrite          RuleKind = "rewrite"
+	KindHandwritePointer RuleKind = "handwrite_pointer"
+	KindDeclared         RuleKind = "declared"
 )
 
 // RuleDef définit le contrat statique d'une règle de transformation d'AST
@@ -35,8 +35,9 @@ type RuleDef struct {
 //     (F-20260810-q2-generic-simd, peer review Q2).
 //
 // Passes structurelles hors table (hard-coded dans TransformAST) :
-//   élision tls T0/T1, motif (x<<N)|(x>>(W-N)) → RotateLeft, fold libc.From*,
-//   * (**T)(__ccgo_up(E)) → (*T)(unsafe.Pointer(E)).
+//
+//	élision tls T0/T1, motif (x<<N)|(x>>(W-N)) → RotateLeft, fold libc.From*,
+//	* (**T)(__ccgo_up(E)) → (*T)(unsafe.Pointer(E)).
 var ArchtimeRulesTable = []RuleDef{
 	{
 		Symbol:      "rotl32",

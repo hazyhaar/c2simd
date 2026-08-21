@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"code.hazyhaar.fr/devhoros/c2simd/sgoiter/emit"
 	"code.hazyhaar.fr/devhoros/c2simd/sgoiter/front"
 )
 
@@ -54,10 +55,60 @@ void fill(blk *blocks, uint32_t i) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// may still skip on store path — at least no crash
 	for _, s := range res.Skipped {
 		if strings.Contains(s, "fill") {
-			t.Log("fill skipped:", s)
+			t.Fatalf("fill skipped: %s", s)
 		}
+	}
+}
+
+func TestStrcmpStringLiteralNotDoubled(t *testing.T) {
+	src := `
+int c2_validate_patch_mode(const char *mode_str) {
+    if (mode_str == 0) return 1;
+    if (strcmp(mode_str, "120000") == 0) return 0;
+    if (strcmp(mode_str, "160000") == 0) return 0;
+    return 1;
+}
+`
+	m, err := front.Parse(src, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := emit.Emit(m, emit.ProfileGo127)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "+ __str_") {
+		t.Fatalf("string literal doubled:\n%s", out)
+	}
+	if !strings.Contains(out, "120000") {
+		t.Fatalf("missing 120000:\n%s", out)
+	}
+}
+
+func TestSwitchBreakNoFallthrough(t *testing.T) {
+	src := `
+int feed(int state, int b) {
+    switch (state) {
+    case 0:
+        if (b == 27) return 1;
+        break;
+    case 1:
+        return 2;
+    }
+    return 0;
+}
+`
+	m, err := front.Parse(src, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := emit.Emit(m, emit.ProfileGo127)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "fallthrough") {
+		t.Fatalf("break case must not fallthrough:\n%s", out)
 	}
 }

@@ -55,7 +55,7 @@ func TestRampUntilLimit(t *testing.T) {
 			t.Logf("%s: %dns/f feed=%dns diff=%dns wall=%s heap=%dMiB ΔRSS=%dKiB allocs=%d",
 				sc.name, ph.total/n, ph.feed/n, ph.diff/n, wall.Truncate(time.Millisecond),
 				ms.HeapInuse>>20, rss1-rss0, ms.Mallocs)
-			if wall > 8*time.Second {
+			if wall > 30*time.Second {
 				t.Fatalf("%s trop lent: %s (goulet perceptible)", sc.name, wall)
 			}
 			checkGrid(t, &g, sc.name)

@@ -64,6 +64,13 @@ func RootClosure(m *ir.Module, roots []string) *ir.Module {
 		}
 		if !f.Static {
 			visit(f)
+			continue
+		}
+		for _, g := range m.Globals {
+			if strings.Contains(g.InitCSV, f.Name) || strings.Contains(g.Data, f.Name) {
+				visit(f)
+				break
+			}
 		}
 	}
 	// Nothing matched: keep the module whole rather than emit an empty file.
@@ -79,7 +86,7 @@ func RootClosure(m *ir.Module, roots []string) *ir.Module {
 	}
 	used := globalsReached(out)
 	for _, g := range m.Globals {
-		if used[sanitizeIdent(g.Name)] || used[g.Name] {
+		if used[sanitizeIdent(g.Name)] || used[g.Name] || used[exportName(g.Name)] {
 			out.Globals = append(out.Globals, g)
 		}
 	}

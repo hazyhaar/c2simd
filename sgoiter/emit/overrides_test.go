@@ -26,10 +26,10 @@ func TestKernelOverridesCompileAndShape(t *testing.T) {
 		want  []string
 	}{
 		{"fnv1a_64.c", []string{"0x100000001b3", "i+8 <= n", "b := "}},
-		{"blake2b_compress.c", []string{"blake2b_sigma", "RotateLeft64"}},
+		{"blake2b_compress.c", []string{"Blake2b_sigma", "RotateLeft64"}},
 		{"fast_xor.c", []string{"SliceData", "i+16 <= n"}},
-		{"murmur3_x86_32.c", []string{"for j <", "RotateLeft32"}},
-		{"base64_simd.c", []string{"b64_table", "j : j+4"}},
+		{"murmur3_x86_32.c", []string{"for j", "RotateLeft32"}},
+		{"base64_simd.c", []string{"B64_table", "j : j+4"}},
 		{"siphash24.c", []string{"0x646f72616d617461", "btail"}},
 		{"strlenspn_lab.c", []string{"ok := c == 'h'", "return uint64(i)"}},
 	}

@@ -2,6 +2,7 @@ package emit
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -72,6 +73,15 @@ func maybeRewriteMurmurLoop(body string) string {
 			// replace ind with j in index expressions carefully
 			s = strings.ReplaceAll(s, "("+blocks+" * 4) + ("+ind+" * 4)", "("+jname+" * 4)")
 			s = strings.ReplaceAll(s, "("+ind+" * 4) + ("+blocks+" * 4)", "("+jname+" * 4)")
+			s = strings.ReplaceAll(s, "("+blocks+"*4) + ("+ind+"*4)", "("+jname+" * 4)")
+			s = strings.ReplaceAll(s, "("+ind+"*4) + ("+blocks+"*4)", "("+jname+" * 4)")
+			// match vBase + (ind * 4) or vBase + (j * 4)
+			reBaseInd := regexp.MustCompile(`v\d+\s*\+\s*\(` + ind + `\s*\*\s*4\)`)
+			s = reBaseInd.ReplaceAllString(s, "("+jname+" * 4)")
+			reBaseInd2 := regexp.MustCompile(`v\d+\s*\+\s*\(` + ind + `\s*\*\s*4\)`)
+			s = reBaseInd2.ReplaceAllString(s, "("+jname+" * 4)")
+			reKeyByteLoad := regexp.MustCompile(`(?:uint32\()?([A-Za-z0-9_]+)\[(?:int\()?\(` + jname + `\s*\*\s*4\)\)?\]\)?`)
+			s = reKeyByteLoad.ReplaceAllString(s, `binary.LittleEndian.Uint32($1[`+jname+`*4:])`)
 			// end increment
 			if strings.TrimSpace(s) == ind+" = "+ind+" + 1" {
 				s = inner + jname + " = " + jname + " + 1"

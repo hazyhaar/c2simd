@@ -63,6 +63,8 @@ func main() {
 		switch lib.Kind {
 		case KindHash64:
 			fmt.Fprintf(&b, "\tfmt.Printf(\"%s %%s\\n\", u64(kernel.%s(d%d, uint64(len(d%d)))))\n", f.Name, lib.SgoFunc, i, i)
+		case KindHash64Seed:
+			fmt.Fprintf(&b, "\tfmt.Printf(\"%s %%s\\n\", u64(kernel.%s(d%d, uint64(len(d%d)), uint64(%d))))\n", f.Name, lib.SgoFunc, i, i, f.Seed)
 		case KindHash32:
 			fmt.Fprintf(&b, "\tfmt.Printf(\"%s %%s\\n\", u32(kernel.%s(d%d, uint64(len(d%d)))))\n", f.Name, lib.SgoFunc, i, i)
 		case KindHash32Seed:
